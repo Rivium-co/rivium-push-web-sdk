@@ -1,0 +1,18 @@
+{
+  "name": "rivium-push-web-example",
+  "version": "1.0.0",
+  "description": "RiviumPush Web SDK Example - Push notifications for browsers",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@rivium/push-web": "file:.."
+  },
+  "devDependencies": {
+    "typescript": "^5.3.3",
+    "vite": "^5.0.0"
+  }
+}

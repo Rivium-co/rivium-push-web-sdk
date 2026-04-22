@@ -1,0 +1,57 @@
+{
+  "name": "@rivium/push-web",
+  "version": "0.1.0",
+  "description": "Web Push SDK for browsers - Firebase alternative that works everywhere",
+  "type": "module",
+  "main": "dist/index.js",
+  "module": "dist/index.esm.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "service-worker.js"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "dev": "rollup -c -w",
+    "test": "NODE_OPTIONS='--experimental-vm-modules' jest --passWithNoTests",
+    "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
+    "test:coverage": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "push-notifications",
+    "web-push",
+    "service-worker",
+    "mqtt",
+    "websocket",
+    "firebase-alternative",
+    "rivium-push"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Rivium-co/rivium-push-web-sdk.git"
+  },
+  "author": "Rivium <support@rivium.co>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Rivium-co/rivium-push-web-sdk/issues"
+  },
+  "homepage": "https://rivium.co/cloud/rivium-push",
+  "devDependencies": {
+    "@rollup/plugin-commonjs": "^25.0.0",
+    "@rollup/plugin-json": "^6.1.0",
+    "@rollup/plugin-node-resolve": "^15.0.0",
+    "@rollup/plugin-terser": "^0.4.0",
+    "@rollup/plugin-typescript": "^11.0.0",
+    "@types/jest": "^29.5.0",
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0",
+    "rollup": "^4.0.0",
+    "ts-jest": "^29.1.0",
+    "tslib": "^2.6.0",
+    "typescript": "^5.0.0"
+  },
+  "dependencies": {
+    "@rivium/pn-protocol": "^0.1.0"
+  }
+}

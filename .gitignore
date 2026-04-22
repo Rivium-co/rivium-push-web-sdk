@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+
+# Credentials
+.env
+*.p8
+*.p12
+*.pem
+
+# Logs
+*.log
+npm-debug.log*
+
+# Example artifacts
+web_example/node_modules/
+web_example/dist/
