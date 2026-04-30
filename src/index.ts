@@ -472,6 +472,8 @@ const RIVIUM_PUSH_SERVER_URL = 'https://push-api.rivium.co';
 class RiviumPush {
   private config: Required<Pick<RiviumPushConfig, 'apiKey'>> & RiviumPushConfig;
   private deviceId: string | null = null;
+  private subscriptionId: string | null = null;
+  private userId: string | null = null;
   private pnSocket: PNSocket | null = null;
   private serviceWorkerRegistration: ServiceWorkerRegistration | null = null;
   private pushSubscription: PushSubscription | null = null;
@@ -535,6 +537,12 @@ class RiviumPush {
     }
 
     this.deviceId = this.getOrCreateDeviceId();
+    // Restore previously-issued subscriptionId so we can stream the new topic
+    // immediately on page load — register() will refresh it.
+    this.subscriptionId = localStorage.getItem('rivium_push_subscription_id') || null;
+    // Restore the userId set in a previous session so we can re-register with
+    // the right user identity automatically (matches OneSignal/Airship).
+    this.userId = localStorage.getItem('rivium_push_user_id') || null;
     this.badgeCount = parseInt(localStorage.getItem('rivium_push_badge_count') || '0', 10);
 
     // Check for initial message (from notification click that opened the page)
@@ -767,8 +775,15 @@ class RiviumPush {
         }
       }
 
-      // Register with backend
-      const response = await this.registerDevice(options);
+      // Register with backend.
+      // Fall back to the persisted userId so callers can call register()
+      // on every page load without forgetting the user identity (matches
+      // OneSignal/Airship behaviour).
+      const effectiveOptions: RegisterOptions = {
+        ...options,
+        userId: options?.userId ?? this.userId ?? undefined,
+      };
+      const response = await this.registerDevice(effectiveOptions);
       this.deviceId = response.deviceId;
 
       // Connect MQTT for real-time messages
@@ -912,9 +927,20 @@ class RiviumPush {
   }
 
   /**
-   * Set user ID
+   * Get the per-install subscription ID issued by the server during registration.
+   * This is the canonical addressing key for inbox / A-B / in-app calls and the
+   * new MQTT topic. Returns `null` until registration succeeds at least once.
+   */
+  getSubscriptionId(): string | null {
+    return this.subscriptionId;
+  }
+
+  /**
+   * Set user ID. Persisted in localStorage so subsequent page loads pick up
+   * the same identity automatically (matches OneSignal/Airship behaviour).
    */
   async setUserId(userId: string): Promise<void> {
+    this.userId = userId;
     localStorage.setItem('rivium_push_user_id', userId);
 
     // Re-register with new user ID
@@ -923,11 +949,19 @@ class RiviumPush {
   }
 
   /**
-   * Clear user ID
+   * Clear user ID. Call this on logout.
    */
   clearUserId(): void {
+    this.userId = null;
     localStorage.removeItem('rivium_push_user_id');
     this.log(RiviumPushLogLevel.INFO, 'User ID cleared');
+  }
+
+  /**
+   * Get the currently-stored userId, if any. Survives page reloads.
+   */
+  getUserId(): string | null {
+    return this.userId;
   }
 
   /**
@@ -1320,7 +1354,7 @@ class RiviumPush {
     return subscription;
   }
 
-  private async registerDevice(options?: RegisterOptions): Promise<{ deviceId: string; mqtt?: { token?: string } }> {
+  private async registerDevice(options?: RegisterOptions): Promise<{ deviceId: string; subscriptionId?: string; mqtt?: { token?: string } }> {
     try {
       // Build request body (use window.location.origin as appIdentifier for per-app isolation)
       const requestBody: Record<string, any> = {
@@ -1371,6 +1405,13 @@ class RiviumPush {
       // Store appId for topic subscriptions
       if (data.appId) {
         this.appId = data.appId;
+      }
+
+      // Capture subscriptionId — the per-install UUID — and persist it.
+      if (data.subscriptionId) {
+        this.subscriptionId = data.subscriptionId;
+        localStorage.setItem('rivium_push_subscription_id', data.subscriptionId);
+        this.log(RiviumPushLogLevel.DEBUG, `Stored subscriptionId: ${data.subscriptionId}`);
       }
 
       // Store appIdentifier for per-app message routing
@@ -1460,14 +1501,18 @@ class RiviumPush {
         this.reconnectAttempts = 0;
         this.trackEvent(RiviumPushAnalyticsEvent.CONNECTED);
 
-        // Stream device-specific channel (includes appIdentifier for app isolation)
         const appId = this.config.apiKey.substring(0, 16);
         const appIdentifier = this.appIdentifier || (typeof window !== 'undefined' ? window.location.origin : '_default');
-        const deviceChannel = `rivium_push/${appId}/${this.deviceId}/${appIdentifier}`;
-        this.pnSocket!.stream(deviceChannel, (message: PNMessage) => {
-          this.handlePNMessage(message);
-        }, this.config.mqttQos as PNDeliveryMode);
-        this.log(RiviumPushLogLevel.DEBUG, 'Streaming from device channel');
+
+        // Per-install subscription channel — primary delivery channel for
+        // every device-targeted message after the subscriptionId migration.
+        if (this.subscriptionId) {
+          const subscriptionChannel = `rivium_push/${appId}/sub/${this.subscriptionId}`;
+          this.pnSocket!.stream(subscriptionChannel, (message: PNMessage) => {
+            this.handlePNMessage(message);
+          }, this.config.mqttQos as PNDeliveryMode);
+          this.log(RiviumPushLogLevel.DEBUG, `Streaming from subscription channel ${subscriptionChannel}`);
+        }
 
         // Stream broadcast channel
         const broadcastChannel = `rivium_push/${appId}/broadcast`;
@@ -1475,6 +1520,16 @@ class RiviumPush {
           this.handlePNMessage(message);
         }, this.config.mqttQos as PNDeliveryMode);
         this.log(RiviumPushLogLevel.DEBUG, 'Streaming from broadcast channel');
+
+        // DEPRECATED: legacy device-scoped channel. The backend stopped
+        // publishing here after the subscriptionId migration. Kept streamed
+        // only to keep older test builds / out-of-tree backends working;
+        // will be removed in a future SDK release.
+        const deviceChannel = `rivium_push/${appId}/${this.deviceId}/${appIdentifier}`;
+        this.pnSocket!.stream(deviceChannel, (message: PNMessage) => {
+          this.handlePNMessage(message);
+        }, this.config.mqttQos as PNDeliveryMode);
+        this.log(RiviumPushLogLevel.DEBUG, 'Streaming from (deprecated) device channel');
 
         // Resubscribe to custom topics
         this.subscribedTopics.forEach((topic) => {

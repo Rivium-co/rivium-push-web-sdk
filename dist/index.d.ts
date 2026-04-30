@@ -329,6 +329,8 @@ export type RiviumPushAnalyticsCallback = (event: RiviumPushAnalyticsEvent, prop
 declare class RiviumPush {
     private config;
     private deviceId;
+    private subscriptionId;
+    private userId;
     private pnSocket;
     private serviceWorkerRegistration;
     private pushSubscription;
@@ -429,13 +431,24 @@ declare class RiviumPush {
      */
     getDeviceId(): string | null;
     /**
-     * Set user ID
+     * Get the per-install subscription ID issued by the server during registration.
+     * This is the canonical addressing key for inbox / A-B / in-app calls and the
+     * new MQTT topic. Returns `null` until registration succeeds at least once.
+     */
+    getSubscriptionId(): string | null;
+    /**
+     * Set user ID. Persisted in localStorage so subsequent page loads pick up
+     * the same identity automatically (matches OneSignal/Airship behaviour).
      */
     setUserId(userId: string): Promise<void>;
     /**
-     * Clear user ID
+     * Clear user ID. Call this on logout.
      */
     clearUserId(): void;
+    /**
+     * Get the currently-stored userId, if any. Survives page reloads.
+     */
+    getUserId(): string | null;
     /**
      * Get the message that launched/opened the app (when user tapped a notification)
      * Returns null if the app was not opened from a notification tap
