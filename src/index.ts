@@ -1260,8 +1260,15 @@ class RiviumPush {
       visibilityState: state.visibilityState,
     });
 
-    // Reconnect when becoming visible if disconnected
-    if (state.isVisible && this.connectionState === 'disconnected' && this.deviceId) {
+    // Reconnect immediately when the app is foregrounded. Reset the backoff
+    // counter first — any exponential delay from failed background retries
+    // is stale now that iOS lets us run again.
+    if (state.isVisible && (this.connectionState === 'disconnected' || this.connectionState === 'error') && this.deviceId) {
+      this.reconnectAttempts = 0;
+      if (this.reconnectTimer) {
+        clearTimeout(this.reconnectTimer);
+        this.reconnectTimer = null;
+      }
       this.log(RiviumPushLogLevel.INFO, 'Reconnecting after becoming visible');
       this.connectToGateway();
     }
@@ -1554,7 +1561,15 @@ class RiviumPush {
 
     // Set up error listener
     this.pnSocket.addErrorListener((error: PNProtocolError) => {
-      this.log(RiviumPushLogLevel.ERROR, 'Gateway error:', error.message);
+      // Connection errors while backgrounded (iOS/Safari suspending the
+      // PWA) are expected, not real errors. Log them at DEBUG so devtools
+      // isn't flooded with red during normal background behavior.
+      const isHidden = typeof document !== 'undefined' && document.hidden;
+      this.log(
+        isHidden ? RiviumPushLogLevel.DEBUG : RiviumPushLogLevel.ERROR,
+        'Gateway error:',
+        error.message,
+      );
       this.setConnectionState('error');
 
       // Map PNProtocolError to RiviumPushErrorCode
@@ -1625,9 +1640,16 @@ class RiviumPush {
       return;
     }
 
-    // Check if we should reconnect (only if online and visible)
+    // Skip reconnect when offline OR when the tab/PWA is hidden. iOS Safari
+    // aggressively suspends background PWAs — retrying just produces
+    // Server-busy / connack-timeout noise. handleVisibilityChange kicks off
+    // a fresh reconnect the moment the app is foregrounded again.
     if (!navigator.onLine) {
       this.log(RiviumPushLogLevel.DEBUG, 'Offline, skipping reconnect');
+      return;
+    }
+    if (typeof document !== 'undefined' && document.hidden) {
+      this.log(RiviumPushLogLevel.DEBUG, 'App hidden, skipping reconnect (will retry on visibilitychange)');
       return;
     }
 
