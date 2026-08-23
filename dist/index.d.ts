@@ -190,6 +190,14 @@ export interface RiviumPushConfig {
     maxReconnectAttempts?: number;
     /** Initial log level (default: DEBUG in dev, ERROR in prod) */
     logLevel?: RiviumPushLogLevel;
+    /**
+     * Your web app version (e.g. "2.0.0"). Sent to the backend on every
+     * register() and surfaced as a first-class segment filter in the
+     * dashboard so you can target specific releases. Web has no equivalent
+     * of iOS CFBundleShortVersionString / Android versionName — you set
+     * this at init time from your build config.
+     */
+    appVersion?: string;
 }
 /**
  * Notification action button
@@ -536,6 +544,13 @@ declare class RiviumPush {
     private registerServiceWorker;
     private requestNotificationPermission;
     private subscribeToPush;
+    /**
+     * Read platform-native device attributes. Sent on every register() so
+     * the dashboard can segment by app version, OS, locale, timezone, etc.
+     * without customers having to populate metadata manually. All fields
+     * best-effort — SSR / older browser combos may leave some undefined.
+     */
+    private captureDeviceAttributes;
     private registerDevice;
     private connectToGateway;
     /**
