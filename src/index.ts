@@ -288,6 +288,14 @@ export interface RiviumPushConfig {
   maxReconnectAttempts?: number;
   /** Initial log level (default: DEBUG in dev, ERROR in prod) */
   logLevel?: RiviumPushLogLevel;
+  /**
+   * Your web app version (e.g. "2.0.0"). Sent to the backend on every
+   * register() and surfaced as a first-class segment filter in the
+   * dashboard so you can target specific releases. Web has no equivalent
+   * of iOS CFBundleShortVersionString / Android versionName — you set
+   * this at init time from your build config.
+   */
+  appVersion?: string;
 }
 
 /**
@@ -1361,20 +1369,73 @@ class RiviumPush {
     return subscription;
   }
 
+  /**
+   * Read platform-native device attributes. Sent on every register() so
+   * the dashboard can segment by app version, OS, locale, timezone, etc.
+   * without customers having to populate metadata manually. All fields
+   * best-effort — SSR / older browser combos may leave some undefined.
+   */
+  private captureDeviceAttributes(): {
+    appVersion?: string;
+    osVersion?: string;
+    deviceModel?: string;
+    language?: string;
+    country?: string;
+    timezone?: string;
+  } {
+    if (typeof navigator === 'undefined') return {};
+
+    // Language + country from navigator.language ("en-US" → ["en", "US"]).
+    // Falls back to language-only if no region tag.
+    const [lang, region] = (navigator.language || '').split('-');
+
+    // Timezone from Intl. Guarded because older Safari can throw.
+    let timezone: string | undefined;
+    try {
+      timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    } catch {
+      timezone = undefined;
+    }
+
+    return {
+      // Web has no bundle-version concept — leave empty. Customers can
+      // still set `version` in options.metadata if they want to segment.
+      appVersion: this.config.appVersion,
+      // Not available on Web (would require UA-Client Hints negotiation).
+      // Left null; dashboard shows null and filters skip.
+      osVersion: undefined,
+      deviceModel: undefined,
+      language: lang || undefined,
+      country: region || undefined,
+      timezone,
+    };
+  }
+
   private async registerDevice(options?: RegisterOptions): Promise<{ deviceId: string; subscriptionId?: string; mqtt?: { token?: string } }> {
     try {
+      // Auto-captured device attributes — sent as top-level fields so the
+      // dashboard's segment builder can filter on them as preset fields.
+      // Everything guarded for SSR safety.
+      const attrs = this.captureDeviceAttributes();
+
       // Build request body (use window.location.origin as appIdentifier for per-app isolation)
       const requestBody: Record<string, any> = {
         deviceId: this.deviceId,
         platform: 'web',
         userId: options?.userId,
         appIdentifier: typeof window !== 'undefined' ? window.location.origin : undefined,
+        // Device attributes are now sent as top-level fields (see `attrs`
+        // below) so they can be used as preset filters in the dashboard.
+        // `metadata.language` is kept for one release as a deprecation
+        // grace period for existing segments that filter on it — new
+        // segments should use the top-level `language` field instead.
         metadata: {
           ...options?.metadata,
-          userAgent: navigator.userAgent,
-          language: navigator.language,
-          url: window.location.origin,
+          userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
+          language: typeof navigator !== 'undefined' ? navigator.language : undefined,
+          url: typeof window !== 'undefined' ? window.location.origin : undefined,
         },
+        ...attrs,
       };
 
       // Add Web Push subscription if available (for background notifications)
