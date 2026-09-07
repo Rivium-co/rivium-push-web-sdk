@@ -41,22 +41,34 @@ const RIVIUM_CONFIG = (() => {
  */
 function riviumReportDelivered(messageId) {
   if (!messageId || !RIVIUM_CONFIG.apiKey || !RIVIUM_CONFIG.deviceId) {
+    console.warn('[RiviumPush SW] Delivery ack skipped — missing messageId or SDK config', {
+      messageId: messageId || null,
+      hasApiKey: !!RIVIUM_CONFIG.apiKey,
+      hasDeviceId: !!RIVIUM_CONFIG.deviceId,
+    });
     return Promise.resolve();
   }
 
+  // No `keepalive`: event.waitUntil already holds the worker open, and
+  // keepalive is unreliable for fetches issued from a service worker.
   return fetch(`${RIVIUM_CONFIG.serverUrl}/receipts/delivered`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'x-api-key': RIVIUM_CONFIG.apiKey,
     },
-    body: JSON.stringify({
-      messageId,
-      deviceId: RIVIUM_CONFIG.deviceId,
-    }),
-    keepalive: true,
+    body: JSON.stringify({ messageId, deviceId: RIVIUM_CONFIG.deviceId }),
   })
-    .then(() => undefined)
+    .then((res) => {
+      // A non-2xx is a failure — resolving on it would hide the problem the
+      // same way the server used to hide an ack for a receipt that did not
+      // exist yet.
+      if (!res.ok) {
+        console.warn('[RiviumPush SW] Delivery ack rejected', res.status);
+        return;
+      }
+      console.log('[RiviumPush SW] Delivery confirmed', messageId);
+    })
     .catch((err) => {
       console.warn('[RiviumPush SW] Delivery ack failed:', err && err.message);
     });
