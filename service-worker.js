@@ -104,10 +104,33 @@ self.addEventListener('push', (event) => {
 
   const options = {
     body: localizedBody || data.body,
-    icon: data.iconUrl || data.icon,
-    badge: data.iconUrl || data.icon,
+    // Icons must resolve to a real file. Android Chrome silently drops a
+    // notification when the icon 404s (desktop is more forgiving), so keep
+    // /icon.png and /badge.png present in your public directory, or always
+    // send iconUrl from the backend.
+    icon: data.iconUrl || data.icon || '/icon.png',
+    // `badge` is the small monochrome icon Android shows in the status bar.
+    badge: data.badgeIcon || data.iconUrl || data.icon || '/badge.png',
     image: data.imageUrl || data.image,
-    tag: data.tag || data.collapseKey || data.threadId || 'rivium-push-notification',
+    // Per-message uniqueness by default. A fixed tag collapses every push
+    // into one slot in the Android shade — new notifications silently replace
+    // older ones and the user never sees the second, third, … arrive. The
+    // backend still opts into grouping by sending an explicit tag or
+    // collapseKey (e.g. to fold "N liked your post" into one).
+    tag:
+      data.tag ||
+      data.collapseKey ||
+      data.threadId ||
+      data.messageId ||
+      `rivium-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+    // renotify forces Android Chrome to actually surface the notification
+    // while Chrome is backgrounded but not closed. Without it Chrome treats
+    // the origin as "about to be focused" and swallows showNotification — the
+    // worker logs success and the shade stays empty. Harmless elsewhere.
+    renotify: true,
+    // A second signal to Android that this is a fresh user-visible event.
+    // Ignored on desktop.
+    vibrate: [200, 100, 200],
     data: {
       ...data.data,
       deepLink: data.deepLink,
@@ -132,15 +155,55 @@ self.addEventListener('push', (event) => {
   // Show notification with potentially localized title
   const title = localizedTitle || data.title;
 
-  // Show the notification and confirm delivery. Both are awaited so the
-  // browser keeps the worker alive until the ack has been sent, but the ack
-  // can never prevent the notification from being displayed.
-  event.waitUntil(
-    Promise.all([
-      self.registration.showNotification(title, options),
-      riviumReportDelivered(data.messageId),
-    ])
-  );
+  event.waitUntil((async () => {
+    // Mirror the payload to any visible page. On mobile the app is usually
+    // backgrounded or the screen is locked, so the page-side connection is
+    // asleep and only the worker sees the push. Pages should dedupe by
+    // messageId, since a foreground client may receive it both ways.
+    try {
+      const clientsList = await self.clients.matchAll({
+        type: 'window',
+        includeUncontrolled: true,
+      });
+      for (const client of clientsList) {
+        client.postMessage({
+          type: 'rivium-push-message',
+          message: {
+            title,
+            body: localizedBody || data.body,
+            data: data.data || {},
+            deepLink: data.deepLink,
+            messageId: data.messageId,
+            campaignId: data.campaignId,
+          },
+        });
+      }
+    } catch (err) {
+      console.warn('[RiviumPush SW] client postMessage failed:', err);
+    }
+
+    // Always show the OS notification: Chrome's user-visible contract revokes
+    // subscriptions that push silently. Wrapped so an Android quirk that would
+    // otherwise fail silently surfaces here; the retry drops the optional
+    // fields (icon/badge/image/actions) that are the usual cause.
+    try {
+      await self.registration.showNotification(title, options);
+    } catch (err) {
+      console.warn('[RiviumPush SW] showNotification failed, retrying minimal', err);
+      try {
+        await self.registration.showNotification(title, {
+          body: options.body,
+          tag: options.tag,
+          data: options.data,
+        });
+      } catch (err2) {
+        console.error('[RiviumPush SW] showNotification (minimal) failed too', err2);
+      }
+    }
+
+    // Confirm arrival so the dashboard can show `delivered`, not only `sent`.
+    await riviumReportDelivered(data.messageId);
+  })());
 });
 
 /**

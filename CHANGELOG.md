@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 - Subscriptions created with an old VAPID key are now detected and recreated. They previously looked valid while every send was rejected.
+- Android Chrome silently dropping notifications: each push now gets a unique `tag` (a fixed tag collapsed them all into one slot), `renotify` is set so Chrome surfaces them while backgrounded, and icons fall back to a real file since a 404 icon makes Android discard the notification.
+- `showNotification` is retried without optional fields if the first call fails, instead of failing silently.
+
+### Added (cont.)
+- The worker mirrors each push to visible pages via `postMessage` (`type: 'rivium-push-message'`), so in-app UI still updates when the page-side connection is asleep. Dedupe by `messageId`.
 
 ### Upgrading
 Copy the updated `service-worker.js` to your public directory — the new handlers live in that file.
