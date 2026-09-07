@@ -543,6 +543,15 @@ declare class RiviumPush {
     private checkInitialMessage;
     private registerServiceWorker;
     private requestNotificationPermission;
+    /**
+     * Whether an existing subscription was created with the given VAPID key.
+     *
+     * `applicationServerKey` comes back as an ArrayBuffer, so compare it against
+     * the decoded form of the current key. If the browser doesn't expose the
+     * option (older implementations), assume a match rather than churn a working
+     * subscription.
+     */
+    private subscriptionMatchesVapidKey;
     private subscribeToPush;
     /**
      * Read platform-native device attributes. Sent on every register() so

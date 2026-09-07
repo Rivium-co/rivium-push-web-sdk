@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.4] - 2026-09-07
+
+### Added
+- Delivery confirmation — the service worker reports notifications it displays, so the dashboard shows `delivered`, not just `sent`.
+- Automatic re-subscription when the browser rotates a push subscription (`pushsubscriptionchange`). Previously the stale endpoint kept failing and notifications silently stopped.
+
+### Fixed
+- Subscriptions created with an old VAPID key are now detected and recreated. They previously looked valid while every send was rejected.
+
+### Upgrading
+Copy the updated `service-worker.js` to your public directory — the new handlers live in that file.
+
 ## [0.1.3] - 2026-08-23
 
 ### Added

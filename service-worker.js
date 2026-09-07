@@ -6,7 +6,61 @@
  */
 
 // Cache name for offline support
-const CACHE_NAME = 'rivium-push-v1';
+const CACHE_NAME = 'rivium-push-v0.1.4';
+
+/**
+ * Config passed by the SDK on the registration URL.
+ *
+ * A service worker is terminated between pushes, so anything kept in memory is
+ * gone by the time the next one arrives. The script URL is persisted by the
+ * browser, so reading config from its query string works on every wake-up
+ * without needing IndexedDB.
+ */
+const RIVIUM_CONFIG = (() => {
+  try {
+    const params = new URL(self.location.href).searchParams;
+    return {
+      apiKey: params.get('riviumApiKey') || null,
+      serverUrl: params.get('riviumServerUrl') || 'https://push-api.rivium.co',
+      deviceId: params.get('riviumDeviceId') || null,
+    };
+  } catch (e) {
+    return { apiKey: null, serverUrl: 'https://push-api.rivium.co', deviceId: null };
+  }
+})();
+
+/**
+ * Confirm delivery to Rivium Push.
+ *
+ * Web Push, APNs and FCM all report only that the push service *accepted* a
+ * notification — none of them confirm it reached the device. This ack is the
+ * only signal that it actually arrived, so the dashboard can distinguish
+ * "accepted" from "delivered".
+ *
+ * Best-effort: a failure here must never stop the notification being shown.
+ */
+function riviumReportDelivered(messageId) {
+  if (!messageId || !RIVIUM_CONFIG.apiKey || !RIVIUM_CONFIG.deviceId) {
+    return Promise.resolve();
+  }
+
+  return fetch(`${RIVIUM_CONFIG.serverUrl}/receipts/delivered`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': RIVIUM_CONFIG.apiKey,
+    },
+    body: JSON.stringify({
+      messageId,
+      deviceId: RIVIUM_CONFIG.deviceId,
+    }),
+    keepalive: true,
+  })
+    .then(() => undefined)
+    .catch((err) => {
+      console.warn('[RiviumPush SW] Delivery ack failed:', err && err.message);
+    });
+}
 
 // Install event
 self.addEventListener('install', (event) => {
@@ -78,8 +132,65 @@ self.addEventListener('push', (event) => {
   // Show notification with potentially localized title
   const title = localizedTitle || data.title;
 
+  // Show the notification and confirm delivery. Both are awaited so the
+  // browser keeps the worker alive until the ack has been sent, but the ack
+  // can never prevent the notification from being displayed.
   event.waitUntil(
-    self.registration.showNotification(title, options)
+    Promise.all([
+      self.registration.showNotification(title, options),
+      riviumReportDelivered(data.messageId),
+    ])
+  );
+});
+
+/**
+ * The browser can rotate a push subscription at any time — after a long idle
+ * period, a browser update, or when it decides the old endpoint is stale.
+ * Without this handler the old endpoint stays registered server-side, keeps
+ * returning 410 Gone, and the user silently stops receiving notifications.
+ *
+ * Re-subscribe with the same VAPID key and register the new endpoint.
+ */
+self.addEventListener('pushsubscriptionchange', (event) => {
+  console.log('[RiviumPush SW] Push subscription changed, re-subscribing');
+
+  const applicationServerKey =
+    (event.oldSubscription &&
+      event.oldSubscription.options &&
+      event.oldSubscription.options.applicationServerKey) ||
+    null;
+
+  if (!applicationServerKey || !RIVIUM_CONFIG.apiKey || !RIVIUM_CONFIG.deviceId) {
+    console.warn(
+      '[RiviumPush SW] Cannot re-subscribe: missing VAPID key or SDK config',
+    );
+    return;
+  }
+
+  event.waitUntil(
+    self.registration.pushManager
+      .subscribe({ userVisibleOnly: true, applicationServerKey })
+      .then((subscription) =>
+        fetch(`${RIVIUM_CONFIG.serverUrl}/devices/register`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': RIVIUM_CONFIG.apiKey,
+          },
+          body: JSON.stringify({
+            deviceId: RIVIUM_CONFIG.deviceId,
+            platform: 'web',
+            appIdentifier: self.location.origin,
+            webPushSubscription: subscription.toJSON(),
+          }),
+        }),
+      )
+      .then(() => {
+        console.log('[RiviumPush SW] Re-subscribed and re-registered');
+      })
+      .catch((err) => {
+        console.error('[RiviumPush SW] Re-subscribe failed:', err && err.message);
+      }),
   );
 });
 

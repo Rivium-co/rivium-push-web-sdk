@@ -1325,8 +1325,18 @@ class RiviumPush {
     }
 
     try {
+      // Pass config on the registration URL rather than by postMessage: a
+      // service worker is terminated between pushes, so anything held in
+      // memory is gone by the time a push arrives. The script URL is
+      // persisted by the browser, so query params survive restarts and are
+      // available to the worker on every wake-up.
+      const swUrl = new URL(this.config.serviceWorkerPath!, self.location.origin);
+      swUrl.searchParams.set('riviumApiKey', this.config.apiKey);
+      swUrl.searchParams.set('riviumServerUrl', RIVIUM_PUSH_SERVER_URL);
+      swUrl.searchParams.set('riviumDeviceId', this.getOrCreateDeviceId());
+
       this.serviceWorkerRegistration = await navigator.serviceWorker.register(
-        this.config.serviceWorkerPath!,
+        swUrl.pathname + swUrl.search,
         { scope: '/' }
       );
       this.log(RiviumPushLogLevel.INFO, 'Service Worker registered');
@@ -1348,6 +1358,33 @@ class RiviumPush {
     return await Notification.requestPermission();
   }
 
+  /**
+   * Whether an existing subscription was created with the given VAPID key.
+   *
+   * `applicationServerKey` comes back as an ArrayBuffer, so compare it against
+   * the decoded form of the current key. If the browser doesn't expose the
+   * option (older implementations), assume a match rather than churn a working
+   * subscription.
+   */
+  private subscriptionMatchesVapidKey(
+    subscription: PushSubscription,
+    vapidPublicKey: string,
+  ): boolean {
+    try {
+      const existingKey = subscription.options?.applicationServerKey;
+      if (!existingKey) return true;
+
+      const existingBytes = new Uint8Array(existingKey as ArrayBuffer);
+      const currentBytes = this.urlBase64ToUint8Array(vapidPublicKey);
+
+      if (existingBytes.length !== currentBytes.length) return false;
+      return existingBytes.every((b, i) => b === currentBytes[i]);
+    } catch {
+      // Never let a comparison failure discard a working subscription.
+      return true;
+    }
+  }
+
   private async subscribeToPush(vapidPublicKey: string): Promise<PushSubscription> {
     if (!this.serviceWorkerRegistration) {
       throw new RiviumPushError(RiviumPushErrorCode.SERVICE_NOT_RUNNING, 'Service Worker not registered');
@@ -1356,8 +1393,24 @@ class RiviumPush {
     // Check if there's an existing subscription
     const existingSubscription = await this.serviceWorkerRegistration.pushManager.getSubscription();
     if (existingSubscription) {
-      this.log(RiviumPushLogLevel.DEBUG, 'Using existing Push subscription');
-      return existingSubscription;
+      // A subscription is bound to the VAPID key it was created with. If the
+      // project's key has since been rotated, the old subscription still looks
+      // valid here but every send is rejected by the push service — silently,
+      // forever. Detect the mismatch and re-subscribe with the current key.
+      if (this.subscriptionMatchesVapidKey(existingSubscription, vapidPublicKey)) {
+        this.log(RiviumPushLogLevel.DEBUG, 'Using existing Push subscription');
+        return existingSubscription;
+      }
+
+      this.log(
+        RiviumPushLogLevel.INFO,
+        'Push subscription was created with a different VAPID key, re-subscribing',
+      );
+      try {
+        await existingSubscription.unsubscribe();
+      } catch (e) {
+        this.log(RiviumPushLogLevel.WARNING, 'Failed to unsubscribe stale subscription:', e);
+      }
     }
 
     const subscription = await this.serviceWorkerRegistration.pushManager.subscribe({
