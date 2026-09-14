@@ -6,7 +6,7 @@
  */
 
 // Cache name for offline support
-const CACHE_NAME = 'rivium-push-v0.1.4';
+const CACHE_NAME = 'rivium-push-v0.1.5';
 
 /**
  * Config passed by the SDK on the registration URL.
@@ -23,9 +23,11 @@ const RIVIUM_CONFIG = (() => {
       apiKey: params.get('riviumApiKey') || null,
       serverUrl: params.get('riviumServerUrl') || 'https://push-api.rivium.co',
       deviceId: params.get('riviumDeviceId') || null,
+      // Added in 0.1.5. SDKs older than 0.1.5 don't pass it.
+      sdkVersion: params.get('riviumSdkVersion') || null,
     };
   } catch (e) {
-    return { apiKey: null, serverUrl: 'https://push-api.rivium.co', deviceId: null };
+    return { apiKey: null, serverUrl: 'https://push-api.rivium.co', deviceId: null, sdkVersion: null };
   }
 })();
 
@@ -257,6 +259,9 @@ self.addEventListener('pushsubscriptionchange', (event) => {
             platform: 'web',
             appIdentifier: self.location.origin,
             webPushSubscription: subscription.toJSON(),
+            // 0.1.5: SDK identity (body, not header, to avoid a CORS preflight).
+            sdkName: 'web',
+            ...(RIVIUM_CONFIG.sdkVersion ? { sdkVersion: RIVIUM_CONFIG.sdkVersion } : {}),
           }),
         }),
       )

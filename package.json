@@ -1,6 +1,6 @@
 {
   "name": "@rivium/push-web",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Web Push SDK for browsers - Firebase alternative that works everywhere",
   "type": "module",
   "main": "dist/index.js",
@@ -8,15 +8,18 @@
   "types": "dist/index.d.ts",
   "files": [
     "dist",
+    "!dist/test",
     "service-worker.js"
   ],
   "scripts": {
+    "prebuild": "node scripts/gen-version.mjs",
     "build": "rollup -c",
     "dev": "rollup -c -w",
     "test": "NODE_OPTIONS='--experimental-vm-modules' jest --passWithNoTests",
     "test:watch": "NODE_OPTIONS='--experimental-vm-modules' jest --watch",
     "test:coverage": "NODE_OPTIONS='--experimental-vm-modules' jest --coverage",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "pretest": "node scripts/gen-version.mjs"
   },
   "keywords": [
     "push-notifications",

@@ -89,8 +89,29 @@ const riviumPush = new RiviumPush({
   mqttQos: 1,                              // Optional - MQTT QoS level (default: 1)
   maxReconnectAttempts: 10,                 // Optional - max reconnect attempts (default: 10)
   logLevel: RiviumPushLogLevel.ERROR,       // Optional - log level
+  appVersion: '2.0.0',                      // Optional - your app version (segment filter)
+  autoRefresh: true,                        // Optional - background re-registration (default: true)
 });
 ```
+
+### Automatic refresh
+
+With `autoRefresh` on (the default), a browser that has registered before is
+silently re-registered on page load when its registration is likely stale: 24
+hours have passed, the push subscription endpoint changed, or `appVersion`, the
+SDK version or the user ID changed. It never shows a permission prompt (it only
+runs when permission is already granted) and never throws. Calling `register()`
+yourself still always registers.
+
+### SDK version
+
+```typescript
+import { SDK_VERSION } from '@rivium/push-web';
+console.log(SDK_VERSION); // "0.1.5"
+```
+
+The SDK reports `sdkName` / `sdkVersion`, the OS and the browser (as
+`osVersion` / `deviceModel`) when registering, so they show up in the dashboard.
 
 ## Callbacks
 
@@ -245,6 +266,12 @@ await riviumPush.unregister();
 </body>
 </html>
 ```
+
+## Delivery Tracking
+
+Notifications are confirmed as `delivered` automatically: Web Push arrivals by
+the service worker, and messages received over the real-time connection on an
+open page by the SDK. No code needed.
 
 ## Browser Support
 

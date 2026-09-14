@@ -5,6 +5,24 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5] - 2026-09-14
+
+### Added
+- SDK identity: the SDK reports its name and version (`SDK_VERSION` export).
+- `autoRefresh` (default `true`): keeps a registered browser up to date on page load.
+- Delivery confirmation for messages received while the page is open.
+- `osVersion` and `deviceModel` (browser) are filled in automatically.
+
+### Fixed
+- `clearUserId()` now detaches the user on the server (it returns a Promise).
+- Pushes forwarded by the service worker to an open page now reach `onMessage`, once per message.
+
+### Service worker
+Copy the updated `service-worker.js`. If you maintain a customised copy, the only
+changes are: read `riviumSdkVersion` from the worker URL, and send `sdkName` /
+`sdkVersion` when re-registering on `pushsubscriptionchange`. An older worker
+keeps working.
+
 ## [0.1.4] - 2026-09-07
 
 ### Added

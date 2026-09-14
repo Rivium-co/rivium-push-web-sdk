@@ -25,6 +25,16 @@ import {
   PNError as PNProtocolError,
   PNConnectionListener,
 } from '@rivium/pn-protocol';
+import { SDK_NAME, SDK_VERSION } from './version';
+import {
+  BoundedSet,
+  detectDeviceInfo,
+  getRefreshReason,
+  parseFingerprint,
+  RegistrationFingerprint,
+} from './internal';
+
+export { SDK_NAME, SDK_VERSION };
 
 // ============================================================================
 // Error Codes (matching Flutter SDK)
@@ -296,6 +306,15 @@ export interface RiviumPushConfig {
    * this at init time from your build config.
    */
   appVersion?: string;
+  /**
+   * Keep the server-side registration fresh without calling register() on
+   * every page load (default: true). On startup, a browser that registered
+   * before is silently re-registered in the background when 24h have passed,
+   * the push subscription endpoint changed, or `appVersion`, the SDK version
+   * or the userId changed. Never prompts: it only runs when notification
+   * permission is already granted. Errors are logged, never thrown.
+   */
+  autoRefresh?: boolean;
 }
 
 /**
@@ -441,6 +460,14 @@ export type RiviumPushAnalyticsCallback = (
 /** Internal server URL - not configurable by users */
 const RIVIUM_PUSH_SERVER_URL = 'https://push-api.rivium.co';
 
+/** localStorage key for the last successful registration fingerprint */
+const REGISTRATION_STATE_KEY = 'rivium_push_registration_state';
+
+/** Delivery acks: attempts per message and delay before each retry */
+const DELIVERY_ACK_RETRY_DELAYS_MS = [1000, 5000];
+/** How many recently acked messageIds to remember for dedupe */
+const DELIVERY_ACK_DEDUPE_LIMIT = 500;
+
 // ============================================================================
 // RiviumPush Web SDK Class
 // ============================================================================
@@ -522,6 +549,15 @@ class RiviumPush {
   private onNetworkStateCallback: OnNetworkStateCallback | null = null;
   private onAppStateCallback: OnAppStateCallback | null = null;
 
+  // Set once the app calls register() so the background refresh stands down
+  private registerRequested = false;
+  // messageIds this page already confirmed delivery for (MQTT can redeliver)
+  private ackedMessageIds = new BoundedSet(DELIVERY_ACK_DEDUPE_LIMIT);
+  // messageIds already handed to the app. A visible page can receive the same
+  // push over the real-time channel and from the service worker, and the
+  // onMessage callback must fire once per message.
+  private receivedMessageIds = new BoundedSet(DELIVERY_ACK_DEDUPE_LIMIT);
+
   constructor(config: RiviumPushConfig) {
     if (!config.apiKey) {
       throw new Error('RiviumPush: apiKey is required');
@@ -529,6 +565,7 @@ class RiviumPush {
     this.config = {
       serviceWorkerPath: '/rivium-push-sw.js',
       autoRegisterServiceWorker: true,
+      autoRefresh: true,
       mqttQos: 1,
       maxReconnectAttempts: 10,
       logLevel: RiviumPushLogLevel.ERROR,
@@ -579,6 +616,10 @@ class RiviumPush {
 
     // Fetch MQTT config from server
     this.fetchMqttConfig();
+
+    if (this.config.autoRefresh) {
+      this.maybeAutoRefresh();
+    }
   }
 
   /**
@@ -741,6 +782,7 @@ class RiviumPush {
    * Register device for push notifications
    */
   async register(options?: RegisterOptions): Promise<string> {
+    this.registerRequested = true;
     try {
       // Wait for config to be fetched (includes VAPID key)
       if (!this.mqttConfigFetched) {
@@ -958,10 +1000,28 @@ class RiviumPush {
 
   /**
    * Clear user ID. Call this on logout.
+   *
+   * Also detaches the user on the server. Registration treats a missing
+   * userId as "keep the existing one", so clearing only local state would
+   * leave this browser receiving the logged-out user's notifications.
    */
-  clearUserId(): void {
+  async clearUserId(): Promise<void> {
     this.userId = null;
     localStorage.removeItem('rivium_push_user_id');
+
+    if (this.deviceId) {
+      try {
+        await fetch(
+          `${RIVIUM_PUSH_SERVER_URL}/devices/${encodeURIComponent(this.deviceId)}/user`,
+          {
+            method: 'DELETE',
+            headers: { 'x-api-key': this.config.apiKey },
+          },
+        );
+      } catch (err) {
+        this.log(RiviumPushLogLevel.WARNING, 'Failed to clear user ID on server:', err);
+      }
+    }
     this.log(RiviumPushLogLevel.INFO, 'User ID cleared');
   }
 
@@ -1334,6 +1394,7 @@ class RiviumPush {
       swUrl.searchParams.set('riviumApiKey', this.config.apiKey);
       swUrl.searchParams.set('riviumServerUrl', RIVIUM_PUSH_SERVER_URL);
       swUrl.searchParams.set('riviumDeviceId', this.getOrCreateDeviceId());
+      swUrl.searchParams.set('riviumSdkVersion', SDK_VERSION);
 
       this.serviceWorkerRegistration = await navigator.serviceWorker.register(
         swUrl.pathname + swUrl.search,
@@ -1454,10 +1515,10 @@ class RiviumPush {
       // Web has no bundle-version concept — leave empty. Customers can
       // still set `version` in options.metadata if they want to segment.
       appVersion: this.config.appVersion,
-      // Not available on Web (would require UA-Client Hints negotiation).
-      // Left null; dashboard shows null and filters skip.
-      osVersion: undefined,
-      deviceModel: undefined,
+      // Best-effort from UA Client Hints / UA string, e.g. osVersion
+      // "Android 14", deviceModel "Chrome 128" (the browser — web has no
+      // hardware model).
+      ...detectDeviceInfo(navigator),
       language: lang || undefined,
       country: region || undefined,
       timezone,
@@ -1475,6 +1536,10 @@ class RiviumPush {
       const requestBody: Record<string, any> = {
         deviceId: this.deviceId,
         platform: 'web',
+        // Sent in the body rather than the X-Rivium-SDK header: a custom
+        // header would need a CORS preflight allowance on the push API.
+        sdkName: SDK_NAME,
+        sdkVersion: SDK_VERSION,
         userId: options?.userId,
         appIdentifier: typeof window !== 'undefined' ? window.location.origin : undefined,
         // Device attributes are now sent as top-level fields (see `attrs`
@@ -1522,6 +1587,8 @@ class RiviumPush {
       }
 
       const data = await response.json();
+
+      this.saveRegistrationState(options?.userId ?? null);
 
       // Store appId for topic subscriptions
       if (data.appId) {
@@ -1796,6 +1863,11 @@ class RiviumPush {
   private handleMqttMessage(topic: string, data: any): void {
     const message = this.normalizeMessage(data);
 
+    if (!this.markReceived(message.messageId)) {
+      this.log(RiviumPushLogLevel.DEBUG, 'Duplicate message ignored:', message.messageId);
+      return;
+    }
+
     this.log(RiviumPushLogLevel.DEBUG, 'Message received:', message.title);
 
     this.trackEvent(RiviumPushAnalyticsEvent.MESSAGE_RECEIVED, {
@@ -1805,6 +1877,10 @@ class RiviumPush {
       hasImage: !!message.imageUrl,
       hasActions: !!message.actions?.length,
     });
+
+    // Confirm delivery. Web Push arrivals are acked by the service worker;
+    // messages over the real-time channel never reach it, so ack here.
+    this.reportDelivered(message.messageId);
 
     // Handle badge
     this.handleBadge(message);
@@ -1820,6 +1896,124 @@ class RiviumPush {
 
     if (this.onMessageCallback) {
       this.onMessageCallback(message);
+    }
+  }
+
+  /**
+   * POST /receipts/delivered for a message received on this page. Deduped per
+   * messageId (the server is idempotent too) and retried a bounded number of
+   * times on network errors, 429 and 5xx. Never throws.
+   */
+  private async reportDelivered(messageId?: string): Promise<void> {
+    if (!messageId || !this.deviceId || typeof fetch === 'undefined') return;
+    if (!this.ackedMessageIds.add(messageId)) return;
+
+    for (let attempt = 0; ; attempt++) {
+      let retryable = true;
+      try {
+        const response = await fetch(`${RIVIUM_PUSH_SERVER_URL}/receipts/delivered`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': this.config.apiKey,
+          },
+          body: JSON.stringify({ messageId, deviceId: this.deviceId }),
+          keepalive: true,
+        });
+        if (response.ok) {
+          this.log(RiviumPushLogLevel.DEBUG, 'Delivery confirmed', messageId);
+          return;
+        }
+        retryable = response.status === 429 || response.status >= 500;
+        this.log(RiviumPushLogLevel.WARNING, `Delivery ack rejected: HTTP ${response.status}`, messageId);
+      } catch (error) {
+        this.log(RiviumPushLogLevel.WARNING, 'Delivery ack failed:', (error as Error)?.message);
+      }
+
+      if (!retryable || attempt >= DELIVERY_ACK_RETRY_DELAYS_MS.length) {
+        // Forget it so a redelivery of the same message can try again.
+        this.ackedMessageIds.delete(messageId);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, DELIVERY_ACK_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+
+  // ==========================================================================
+  // Private Methods - Automatic registration refresh
+  // ==========================================================================
+
+  private saveRegistrationState(userId: string | null): void {
+    try {
+      const state: RegistrationFingerprint = {
+        registeredAt: Date.now(),
+        endpoint: this.pushSubscription?.endpoint ?? null,
+        appVersion: this.config.appVersion ?? null,
+        sdkVersion: SDK_VERSION,
+        userId,
+      };
+      localStorage.setItem(REGISTRATION_STATE_KEY, JSON.stringify(state));
+    } catch {
+      // Storage full / blocked — refresh just runs again next load.
+    }
+  }
+
+  /**
+   * Silently re-register a browser that registered before, when the server's
+   * copy is likely stale. Never prompts for permission and never throws.
+   */
+  private async maybeAutoRefresh(): Promise<void> {
+    try {
+      const previous = parseFingerprint(localStorage.getItem(REGISTRATION_STATE_KEY));
+      // 0.1.4 and earlier stored no fingerprint; a stored subscriptionId
+      // still proves this browser registered.
+      if (!previous && !localStorage.getItem('rivium_push_subscription_id')) return;
+      if (typeof Notification === 'undefined' || Notification.permission !== 'granted') return;
+
+      await this.waitForConfig();
+      // The app called register() itself on this page load — nothing to do.
+      if (this.registerRequested) return;
+      // Without the server config there is no VAPID key, and registering
+      // without a subscription could drop a working one server-side.
+      if (!this.mqttConfigFetched && !this.config.vapidPublicKey) return;
+
+      if ('serviceWorker' in navigator) {
+        if (this.config.autoRegisterServiceWorker) {
+          await this.registerServiceWorker();
+        } else {
+          this.serviceWorkerRegistration = (await navigator.serviceWorker.getRegistration()) ?? null;
+        }
+      }
+
+      // Permission is already granted, so this never prompts. It recreates a
+      // subscription the browser dropped or one bound to an old VAPID key.
+      let subscription: PushSubscription | null = null;
+      const vapidKey = this.vapidPublicKey || this.config.vapidPublicKey;
+      if (vapidKey && this.serviceWorkerRegistration) {
+        subscription = await this.subscribeToPush(vapidKey);
+      }
+
+      const reason = getRefreshReason(
+        previous,
+        {
+          endpoint: subscription?.endpoint ?? null,
+          appVersion: this.config.appVersion ?? null,
+          sdkVersion: SDK_VERSION,
+          userId: this.userId,
+        },
+        Date.now(),
+      );
+      if (!reason || this.registerRequested) {
+        this.log(RiviumPushLogLevel.DEBUG, 'Registration is fresh, skipping auto refresh');
+        return;
+      }
+
+      this.log(RiviumPushLogLevel.INFO, `Refreshing registration in background (${reason})`);
+      if (subscription) this.pushSubscription = subscription;
+      await this.registerDevice({ userId: this.userId ?? undefined });
+      this.log(RiviumPushLogLevel.INFO, 'Background registration refresh complete');
+    } catch (error) {
+      this.log(RiviumPushLogLevel.WARNING, 'Background registration refresh failed:', error);
     }
   }
 
@@ -1900,13 +2094,31 @@ class RiviumPush {
     this.setBadgeCount(newBadge);
   }
 
+  /**
+   * Records a messageId as handed to the app. Returns false if it already was.
+   * Messages without an id can't be deduped and always pass.
+   */
+  private markReceived(messageId?: string): boolean {
+    if (!messageId) return true;
+    return this.receivedMessageIds.add(messageId);
+  }
+
   private handleServiceWorkerMessage(event: MessageEvent): void {
     const data = event.data;
+    if (!data || typeof data !== 'object') return;
 
-    if (data.type === 'push-message') {
+    // The worker posts 'rivium-push-message'; 'push-message' is the name this
+    // handler originally listened for, kept so older or customised service
+    // workers still reach the page.
+    if (data.type === 'rivium-push-message' || data.type === 'push-message') {
       // Message forwarded from service worker (when tab is visible)
       this.log(RiviumPushLogLevel.DEBUG, 'Push message received from SW:', data.message?.title);
-      const message = this.normalizeMessage(data.message);
+      const message = this.normalizeMessage(data.message || {});
+
+      if (!this.markReceived(message.messageId)) {
+        this.log(RiviumPushLogLevel.DEBUG, 'Duplicate message ignored:', message.messageId);
+        return;
+      }
 
       this.trackEvent(RiviumPushAnalyticsEvent.MESSAGE_RECEIVED, {
         messageId: message.messageId,

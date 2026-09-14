@@ -14,6 +14,8 @@
  *
  * @packageDocumentation
  */
+import { SDK_NAME, SDK_VERSION } from './version';
+export { SDK_NAME, SDK_VERSION };
 /**
  * Standardized error codes for RiviumPush SDK.
  * These codes help developers identify and handle specific error scenarios.
@@ -198,6 +200,15 @@ export interface RiviumPushConfig {
      * this at init time from your build config.
      */
     appVersion?: string;
+    /**
+     * Keep the server-side registration fresh without calling register() on
+     * every page load (default: true). On startup, a browser that registered
+     * before is silently re-registered in the background when 24h have passed,
+     * the push subscription endpoint changed, or `appVersion`, the SDK version
+     * or the userId changed. Never prompts: it only runs when notification
+     * permission is already granted. Errors are logged, never thrown.
+     */
+    autoRefresh?: boolean;
 }
 /**
  * Notification action button
@@ -368,6 +379,9 @@ declare class RiviumPush {
     private onReconnectingCallback;
     private onNetworkStateCallback;
     private onAppStateCallback;
+    private registerRequested;
+    private ackedMessageIds;
+    private receivedMessageIds;
     constructor(config: RiviumPushConfig);
     /**
      * Fetch MQTT and VAPID configuration from server
@@ -451,8 +465,12 @@ declare class RiviumPush {
     setUserId(userId: string): Promise<void>;
     /**
      * Clear user ID. Call this on logout.
+     *
+     * Also detaches the user on the server. Registration treats a missing
+     * userId as "keep the existing one", so clearing only local state would
+     * leave this browser receiving the logged-out user's notifications.
      */
-    clearUserId(): void;
+    clearUserId(): Promise<void>;
     /**
      * Get the currently-stored userId, if any. Survives page reloads.
      */
@@ -569,9 +587,26 @@ declare class RiviumPush {
     private disconnectFromGateway;
     private scheduleReconnect;
     private handleMqttMessage;
+    /**
+     * POST /receipts/delivered for a message received on this page. Deduped per
+     * messageId (the server is idempotent too) and retried a bounded number of
+     * times on network errors, 429 and 5xx. Never throws.
+     */
+    private reportDelivered;
+    private saveRegistrationState;
+    /**
+     * Silently re-register a browser that registered before, when the server's
+     * copy is likely stale. Never prompts for permission and never throws.
+     */
+    private maybeAutoRefresh;
     private normalizeMessage;
     private getLocalizedContent;
     private handleBadge;
+    /**
+     * Records a messageId as handed to the app. Returns false if it already was.
+     * Messages without an id can't be deduped and always pass.
+     */
+    private markReceived;
     private handleServiceWorkerMessage;
     private showRichNotification;
     private updateFaviconBadge;
