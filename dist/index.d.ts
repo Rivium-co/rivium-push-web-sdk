@@ -16,9 +16,12 @@
  */
 import { SDK_NAME, SDK_VERSION } from './version';
 import { RiviumInbox } from './inbox';
+import { InAppMessages, type InAppConfig } from './in-app';
 export { SDK_NAME, SDK_VERSION };
 export { RiviumInbox } from './inbox';
 export type { InboxContent, InboxFilter, InboxMessage, InboxMessagesResponse, InboxMessageStatus, OnInboxMessageCallback, OnInboxStatusChangeCallback, OnInboxUnreadCountCallback, } from './inbox';
+export { InAppMessages, isInAppMessageEligible, selectInAppMessages, localizedContent } from './in-app';
+export type { InAppBannerPosition, InAppButton, InAppButtonAction, InAppButtonStyle, InAppConfig, InAppEligibilityContext, InAppFilter, InAppImpressionAction, InAppLocalization, InAppMessage, InAppMessageContent, InAppMessageType, InAppTriggerType, OnInAppButtonClickedCallback, OnInAppDismissedCallback, OnInAppMessageReadyCallback, } from './in-app';
 /**
  * Standardized error codes for RiviumPush SDK.
  * These codes help developers identify and handle specific error scenarios.
@@ -212,6 +215,12 @@ export interface RiviumPushConfig {
      * permission is already granted. Errors are logged, never thrown.
      */
     autoRefresh?: boolean;
+    /**
+     * In-App Messages options. Omit it to keep the defaults: the built-in
+     * shadow-DOM UI, triggered by your calls to `inApp.triggerOnAppOpen()` /
+     * `inApp.triggerEvent()`.
+     */
+    inApp?: InAppConfig;
 }
 /**
  * Notification action button
@@ -390,6 +399,11 @@ declare class RiviumPush {
      * a registered device.
      */
     readonly inbox: RiviumInbox;
+    /**
+     * In-App Messages. Listeners can be attached immediately; network calls
+     * need a registered device.
+     */
+    readonly inApp: InAppMessages;
     constructor(config: RiviumPushConfig);
     /**
      * Fetch MQTT and VAPID configuration from server

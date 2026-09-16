@@ -34,6 +34,7 @@ import {
   RegistrationFingerprint,
 } from './internal';
 import { RiviumInbox } from './inbox';
+import { InAppMessages, type InAppConfig } from './in-app';
 
 export { SDK_NAME, SDK_VERSION };
 export { RiviumInbox } from './inbox';
@@ -47,6 +48,25 @@ export type {
   OnInboxStatusChangeCallback,
   OnInboxUnreadCountCallback,
 } from './inbox';
+export { InAppMessages, isInAppMessageEligible, selectInAppMessages, localizedContent } from './in-app';
+export type {
+  InAppBannerPosition,
+  InAppButton,
+  InAppButtonAction,
+  InAppButtonStyle,
+  InAppConfig,
+  InAppEligibilityContext,
+  InAppFilter,
+  InAppImpressionAction,
+  InAppLocalization,
+  InAppMessage,
+  InAppMessageContent,
+  InAppMessageType,
+  InAppTriggerType,
+  OnInAppButtonClickedCallback,
+  OnInAppDismissedCallback,
+  OnInAppMessageReadyCallback,
+} from './in-app';
 
 // ============================================================================
 // Error Codes (matching Flutter SDK)
@@ -327,6 +347,12 @@ export interface RiviumPushConfig {
    * permission is already granted. Errors are logged, never thrown.
    */
   autoRefresh?: boolean;
+  /**
+   * In-App Messages options. Omit it to keep the defaults: the built-in
+   * shadow-DOM UI, triggered by your calls to `inApp.triggerOnAppOpen()` /
+   * `inApp.triggerEvent()`.
+   */
+  inApp?: InAppConfig;
 }
 
 /**
@@ -576,6 +602,12 @@ class RiviumPush {
    */
   readonly inbox: RiviumInbox;
 
+  /**
+   * In-App Messages. Listeners can be attached immediately; network calls
+   * need a registered device.
+   */
+  readonly inApp: InAppMessages;
+
   constructor(config: RiviumPushConfig) {
     if (!config.apiKey) {
       throw new Error('RiviumPush: apiKey is required');
@@ -608,6 +640,15 @@ class RiviumPush {
               : RiviumPushErrorCode.NOT_INITIALIZED;
         return new RiviumPushError(code, details);
       },
+    });
+
+    this.inApp = new InAppMessages({
+      serverUrl: RIVIUM_PUSH_SERVER_URL,
+      getApiKey: () => this.config.apiKey,
+      getDeviceId: () => this.deviceId,
+      getUserId: () => this.userId,
+      log: (level, message, ...args) => this.log(level as RiviumPushLogLevel, message, ...args),
+      config: this.config.inApp,
     });
 
     if (typeof window === 'undefined') {
@@ -648,6 +689,10 @@ class RiviumPush {
     this.trackEvent(RiviumPushAnalyticsEvent.SDK_INITIALIZED);
 
     this.log(RiviumPushLogLevel.INFO, 'RiviumPush SDK initialized');
+
+    // Counts the page load as a session so `minSessionCount` works, and fires
+    // the app-open triggers when `inApp.autoTrigger` is on.
+    this.inApp.startSession();
 
     // Fetch MQTT config from server
     this.fetchMqttConfig();
@@ -1031,6 +1076,7 @@ class RiviumPush {
     // Re-register with new user ID
     // The cached inbox belongs to the previous identity.
     this.inbox.onIdentityChanged();
+    this.inApp.onIdentityChanged();
 
     await this.registerDevice({ userId });
     this.log(RiviumPushLogLevel.INFO, 'User ID set:', userId);
@@ -1047,6 +1093,7 @@ class RiviumPush {
     this.userId = null;
     localStorage.removeItem('rivium_push_user_id');
     this.inbox.onIdentityChanged();
+    this.inApp.onIdentityChanged();
 
     if (this.deviceId) {
       try {

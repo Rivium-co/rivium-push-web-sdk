@@ -295,6 +295,47 @@ await riviumPush.inbox.markAllAsRead();
 Messages are cached per device and restored on the next page load. The cache is
 dropped when the user changes (`setUserId` / `clearUserId`).
 
+## In-App Messages
+
+In-app messages are campaigns shown inside your page — a modal, banner,
+fullscreen takeover or card — when a trigger fires. `riviumPush.inApp` needs a
+registered device.
+
+```typescript
+const riviumPush = new RiviumPush({
+  apiKey: 'rv_live_your_api_key',
+  inApp: {
+    display: 'auto',        // 'manual' to render your own UI
+    autoTrigger: false,     // true fires session-start + app-open on page load
+    bannerPosition: 'top',
+  },
+});
+
+riviumPush.inApp.onMessageReady((message) => console.log(message.name));
+riviumPush.inApp.onButtonClicked((message, button) => {
+  if (button.action === 'custom') doSomething(button.value);
+});
+riviumPush.inApp.onDismissed((message) => console.log('closed', message.id));
+
+await riviumPush.inApp.triggerOnAppOpen();
+await riviumPush.inApp.triggerEvent('purchase_completed', { plan: 'pro' });
+```
+
+The built-in UI renders into a **shadow DOM** root, so your page's CSS can never
+break it and the SDK's CSS never leaks into your page. Modals and fullscreen
+messages are dialogs (`role="dialog"`, `aria-modal`, focus trap, focus restored
+on close, dismissible with Escape or a backdrop click); banners and cards are
+polite live regions. Reduced-motion preferences are respected.
+
+With `display: 'manual'` nothing is inserted into the page: you get
+`onMessageReady` and render the message yourself, then call
+`riviumPush.inApp.recordImpression(id, 'button_click', buttonId)` and
+`riviumPush.inApp.dismissCurrentMessage()` as the user interacts.
+
+Eligible messages are cached per device for 5 minutes, and impression counts,
+schedules and `minSessionCount` are enforced locally as well as on the server.
+The cache is dropped when the user changes (`setUserId` / `clearUserId`).
+
 ## Delivery Tracking
 
 Notifications are confirmed as `delivered` automatically: Web Push arrivals by

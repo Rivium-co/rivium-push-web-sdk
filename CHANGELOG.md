@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.7] - 2026-09-16
+
+### Added
+- In-App Messages (`riviumPush.inApp`): modal, banner, fullscreen and card
+  campaigns triggered on app open, session start or a custom event.
+- The built-in UI renders in a shadow root, is keyboard and screen-reader
+  accessible, and can be replaced with your own via `inApp.display: 'manual'`.
+
 ## [0.1.6] - 2026-09-16
 
 ### Added
