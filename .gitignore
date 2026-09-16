@@ -27,3 +27,6 @@ npm-debug.log*
 # Example artifacts
 web_example/node_modules/
 web_example/dist/
+
+# Build artefacts of tests — never published (see package.json "files")
+dist/test/

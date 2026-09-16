@@ -15,7 +15,10 @@
  * @packageDocumentation
  */
 import { SDK_NAME, SDK_VERSION } from './version';
+import { RiviumInbox } from './inbox';
 export { SDK_NAME, SDK_VERSION };
+export { RiviumInbox } from './inbox';
+export type { InboxContent, InboxFilter, InboxMessage, InboxMessagesResponse, InboxMessageStatus, OnInboxMessageCallback, OnInboxStatusChangeCallback, OnInboxUnreadCountCallback, } from './inbox';
 /**
  * Standardized error codes for RiviumPush SDK.
  * These codes help developers identify and handle specific error scenarios.
@@ -382,6 +385,11 @@ declare class RiviumPush {
     private registerRequested;
     private ackedMessageIds;
     private receivedMessageIds;
+    /**
+     * Message Inbox. Listeners can be attached immediately; network calls need
+     * a registered device.
+     */
+    readonly inbox: RiviumInbox;
     constructor(config: RiviumPushConfig);
     /**
      * Fetch MQTT and VAPID configuration from server
@@ -607,6 +615,13 @@ declare class RiviumPush {
      * Messages without an id can't be deduped and always pass.
      */
     private markReceived;
+    /**
+     * `inbox_update` payloads update the Message Inbox instead of being shown
+     * as a notification. Deduped by message id like delivery acks, so a payload
+     * arriving over both the real-time channel and the service worker counts
+     * once. Returns true when the payload was an inbox update.
+     */
+    private routeInboxUpdate;
     private handleServiceWorkerMessage;
     private showRichNotification;
     private updateFaviconBadge;

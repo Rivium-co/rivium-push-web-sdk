@@ -267,6 +267,34 @@ await riviumPush.unregister();
 </html>
 ```
 
+## Message Inbox
+
+Inbox messages are stored server-side and stay available until the user reads,
+archives or deletes them. `riviumPush.inbox` needs a registered device.
+
+```typescript
+// Live updates (an inbox message never shows a notification)
+riviumPush.inbox.onMessage((message) => console.log(message.content.title));
+riviumPush.inbox.onUnreadCountChange((count) => setBadge(count));
+
+// Read
+const { messages, total, unreadCount } = await riviumPush.inbox.getMessages({
+  status: 'unread',
+  limit: 20,
+});
+const cached = riviumPush.inbox.getCachedMessages(); // instant, no network
+
+// Write
+await riviumPush.inbox.markAsRead(messages[0].id);
+await riviumPush.inbox.archiveMessage(messages[0].id);
+await riviumPush.inbox.deleteMessage(messages[0].id);
+await riviumPush.inbox.markMultiple(['id-1', 'id-2'], 'read');
+await riviumPush.inbox.markAllAsRead();
+```
+
+Messages are cached per device and restored on the next page load. The cache is
+dropped when the user changes (`setUserId` / `clearUserId`).
+
 ## Delivery Tracking
 
 Notifications are confirmed as `delivered` automatically: Web Push arrivals by

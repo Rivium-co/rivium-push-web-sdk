@@ -33,8 +33,20 @@ import {
   parseFingerprint,
   RegistrationFingerprint,
 } from './internal';
+import { RiviumInbox } from './inbox';
 
 export { SDK_NAME, SDK_VERSION };
+export { RiviumInbox } from './inbox';
+export type {
+  InboxContent,
+  InboxFilter,
+  InboxMessage,
+  InboxMessagesResponse,
+  InboxMessageStatus,
+  OnInboxMessageCallback,
+  OnInboxStatusChangeCallback,
+  OnInboxUnreadCountCallback,
+} from './inbox';
 
 // ============================================================================
 // Error Codes (matching Flutter SDK)
@@ -558,6 +570,12 @@ class RiviumPush {
   // onMessage callback must fire once per message.
   private receivedMessageIds = new BoundedSet(DELIVERY_ACK_DEDUPE_LIMIT);
 
+  /**
+   * Message Inbox. Listeners can be attached immediately; network calls need
+   * a registered device.
+   */
+  readonly inbox: RiviumInbox;
+
   constructor(config: RiviumPushConfig) {
     if (!config.apiKey) {
       throw new Error('RiviumPush: apiKey is required');
@@ -574,6 +592,23 @@ class RiviumPush {
 
     this.maxReconnectAttempts = this.config.maxReconnectAttempts!;
     this.logLevel = this.config.logLevel!;
+
+    this.inbox = new RiviumInbox({
+      serverUrl: RIVIUM_PUSH_SERVER_URL,
+      getApiKey: () => this.config.apiKey,
+      getDeviceId: () => this.deviceId,
+      getUserId: () => this.userId,
+      log: (level, message, ...args) => this.log(level as RiviumPushLogLevel, message, ...args),
+      createError: (kind, details) => {
+        const code =
+          kind === 'network'
+            ? RiviumPushErrorCode.NETWORK_ERROR
+            : kind === 'server'
+              ? RiviumPushErrorCode.SERVER_ERROR
+              : RiviumPushErrorCode.NOT_INITIALIZED;
+        return new RiviumPushError(code, details);
+      },
+    });
 
     if (typeof window === 'undefined') {
       // SSR environment (Next.js server-side) - skip browser-only initialization
@@ -994,6 +1029,9 @@ class RiviumPush {
     localStorage.setItem('rivium_push_user_id', userId);
 
     // Re-register with new user ID
+    // The cached inbox belongs to the previous identity.
+    this.inbox.onIdentityChanged();
+
     await this.registerDevice({ userId });
     this.log(RiviumPushLogLevel.INFO, 'User ID set:', userId);
   }
@@ -1008,6 +1046,7 @@ class RiviumPush {
   async clearUserId(): Promise<void> {
     this.userId = null;
     localStorage.removeItem('rivium_push_user_id');
+    this.inbox.onIdentityChanged();
 
     if (this.deviceId) {
       try {
@@ -1861,6 +1900,8 @@ class RiviumPush {
   }
 
   private handleMqttMessage(topic: string, data: any): void {
+    if (this.routeInboxUpdate(data)) return;
+
     const message = this.normalizeMessage(data);
 
     if (!this.markReceived(message.messageId)) {
@@ -2103,6 +2144,27 @@ class RiviumPush {
     return this.receivedMessageIds.add(messageId);
   }
 
+  /**
+   * `inbox_update` payloads update the Message Inbox instead of being shown
+   * as a notification. Deduped by message id like delivery acks, so a payload
+   * arriving over both the real-time channel and the service worker counts
+   * once. Returns true when the payload was an inbox update.
+   */
+  private routeInboxUpdate(payload: any): boolean {
+    const type = payload?.type ?? payload?.data?.type;
+    if (type !== 'inbox_update') return false;
+
+    const messageId = payload.messageId ?? payload.id;
+    if (messageId && !this.markReceived(String(messageId))) {
+      this.log(RiviumPushLogLevel.DEBUG, 'Duplicate inbox update ignored:', messageId);
+      return true;
+    }
+
+    this.log(RiviumPushLogLevel.DEBUG, 'Routing inbox_update to inbox:', messageId);
+    this.inbox.handleIncomingPayload(payload);
+    return true;
+  }
+
   private handleServiceWorkerMessage(event: MessageEvent): void {
     const data = event.data;
     if (!data || typeof data !== 'object') return;
@@ -2113,6 +2175,8 @@ class RiviumPush {
     if (data.type === 'rivium-push-message' || data.type === 'push-message') {
       // Message forwarded from service worker (when tab is visible)
       this.log(RiviumPushLogLevel.DEBUG, 'Push message received from SW:', data.message?.title);
+      if (this.routeInboxUpdate(data.message || {})) return;
+
       const message = this.normalizeMessage(data.message || {});
 
       if (!this.markReceived(message.messageId)) {
