@@ -105,7 +105,7 @@ web_example/
 import Pushino, { PushinoLogLevel } from '@pushino/web-sdk';
 
 const pushino = new Pushino({
-  apiKey: 'nl_live_your_api_key',
+  apiKey: 'rv_live_your_api_key',
   serverUrl: 'https://api.pushino.io',
   logLevel: PushinoLogLevel.DEBUG,
 });
