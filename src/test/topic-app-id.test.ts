@@ -58,3 +58,40 @@ describe('MQTT channels use the id the backend publishes to', () => {
     expect(streamed.some((c2) => c2.includes('rv_live_'))).toBe(false);
   });
 });
+
+/**
+ * A message arriving over the real-time connection while the page is visible
+ * is handed to the app and NOT shown as an OS notification. Before the
+ * real-time path worked, the service worker showed every notification and
+ * ignored visibility, so apps relied on that. `showNotification()` lets the
+ * app ask for one when it knows the user should see it.
+ */
+describe('showNotification', () => {
+  const client = (): any => new RiviumPush({ apiKey: API_KEY });
+  const message = { title: 'Someone', body: 'salam', messageId: 'm-1' } as any;
+
+  it('shows the notification through the service worker', () => {
+    const c = client();
+    const shown: any[] = [];
+    c.serviceWorkerRegistration = { showNotification: (t: string, o: any) => shown.push([t, o]) };
+    (globalThis as any).Notification = { permission: 'granted' };
+
+    c.showNotification(message);
+
+    expect(shown).toHaveLength(1);
+    expect(shown[0][0]).toBe('Someone');
+    // Same tag rule as the worker, so a Web Push copy replaces it.
+    expect(shown[0][1].tag).toBe('m-1');
+  });
+
+  it('does nothing without permission', () => {
+    const c = client();
+    const shown: any[] = [];
+    c.serviceWorkerRegistration = { showNotification: () => shown.push(1) };
+    (globalThis as any).Notification = { permission: 'default' };
+
+    c.showNotification(message);
+
+    expect(shown).toHaveLength(0);
+  });
+});

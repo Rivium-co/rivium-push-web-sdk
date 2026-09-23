@@ -467,6 +467,20 @@ declare class RiviumPush {
      */
     unsubscribeTopic(topic: string): Promise<void>;
     /**
+     * Show an OS notification for a message the app received while its page was
+     * visible.
+     *
+     * A message that arrives over the real-time connection is handed to
+     * `onMessage` and, while the page is visible, deliberately not shown as an
+     * OS notification - the app is in front and usually shows its own UI. Some
+     * messages still deserve one: a chat message for a conversation the user is
+     * not reading, for instance. The app knows that; the SDK does not.
+     *
+     * Goes through the service worker when there is one, so clicks are handled
+     * the same way as a notification the worker showed itself.
+     */
+    showNotification(message: RiviumPushMessage): void;
+    /**
      * Check if connected to MQTT broker
      */
     isConnected(): boolean;

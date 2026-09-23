@@ -6,7 +6,7 @@
  */
 
 // Cache name for offline support
-const CACHE_NAME = 'rivium-push-v0.1.9';
+const CACHE_NAME = 'rivium-push-v0.1.10';
 
 /**
  * Where the worker gets its API key and device id.
