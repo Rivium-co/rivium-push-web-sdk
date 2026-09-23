@@ -582,6 +582,15 @@ declare class RiviumPush {
     private handleVisibilityChange;
     private checkInitialMessage;
     private registerServiceWorker;
+    /**
+     * Keeps `rivium-push` / `config` up to date for the service worker.
+     *
+     * Rewritten on every load, so a device id or server URL that changed does
+     * not leave a stale record behind. Best-effort: private browsing and
+     * blocked site data make IndexedDB unavailable, and the worker then falls
+     * back to its URL exactly as before.
+     */
+    private storeServiceWorkerConfig;
     private requestNotificationPermission;
     /**
      * Whether an existing subscription was created with the given VAPID key.

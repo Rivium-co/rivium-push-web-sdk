@@ -1482,6 +1482,14 @@ class RiviumPush {
       swUrl.searchParams.set('riviumDeviceId', this.getOrCreateDeviceId());
       swUrl.searchParams.set('riviumSdkVersion', SDK_VERSION);
 
+      // The same config in storage, as the worker's fallback. A worker that
+      // the app registered itself - a plain register('/rivium-push-sw.js'),
+      // another library, or a hot reload in development - carries no query
+      // string, and used to go on showing notifications while silently
+      // confirming none of them. Written before registering, so a worker that
+      // activates immediately already finds it.
+      await this.storeServiceWorkerConfig();
+
       this.serviceWorkerRegistration = await navigator.serviceWorker.register(
         swUrl.pathname + swUrl.search,
         { scope: '/' }
@@ -1491,6 +1499,58 @@ class RiviumPush {
       this.log(RiviumPushLogLevel.ERROR, 'Service Worker registration failed:', error);
       throw new RiviumPushError(RiviumPushErrorCode.SERVICE_NOT_RUNNING, (error as Error).message);
     }
+  }
+
+  /**
+   * Keeps `rivium-push` / `config` up to date for the service worker.
+   *
+   * Rewritten on every load, so a device id or server URL that changed does
+   * not leave a stale record behind. Best-effort: private browsing and
+   * blocked site data make IndexedDB unavailable, and the worker then falls
+   * back to its URL exactly as before.
+   */
+  private storeServiceWorkerConfig(): Promise<void> {
+    return new Promise<void>((resolve) => {
+      if (typeof indexedDB === 'undefined') return resolve();
+      let request: IDBOpenDBRequest;
+      try {
+        request = indexedDB.open('rivium-push', 1);
+      } catch {
+        return resolve();
+      }
+      request.onupgradeneeded = () => {
+        if (!request.result.objectStoreNames.contains('config')) {
+          request.result.createObjectStore('config');
+        }
+      };
+      request.onerror = () => resolve();
+      request.onsuccess = () => {
+        const db = request.result;
+        try {
+          const tx = db.transaction('config', 'readwrite');
+          tx.objectStore('config').put(
+            {
+              apiKey: this.config.apiKey,
+              serverUrl: RIVIUM_PUSH_SERVER_URL,
+              deviceId: this.getOrCreateDeviceId(),
+              sdkVersion: SDK_VERSION,
+            },
+            'config',
+          );
+          tx.oncomplete = () => {
+            db.close();
+            resolve();
+          };
+          tx.onerror = () => {
+            db.close();
+            resolve();
+          };
+        } catch {
+          db.close();
+          resolve();
+        }
+      };
+    });
   }
 
   private async requestNotificationPermission(): Promise<NotificationPermission> {

@@ -6,30 +6,100 @@
  */
 
 // Cache name for offline support
-const CACHE_NAME = 'rivium-push-v0.1.5';
+const CACHE_NAME = 'rivium-push-v0.1.8';
 
 /**
- * Config passed by the SDK on the registration URL.
+ * Where the worker gets its API key and device id.
  *
- * A service worker is terminated between pushes, so anything kept in memory is
- * gone by the time the next one arrives. The script URL is persisted by the
- * browser, so reading config from its query string works on every wake-up
- * without needing IndexedDB.
+ * A service worker is terminated between pushes, so nothing can be kept in
+ * memory. Two durable places hold the config, and both are read:
+ *
+ *  1. The registration URL's query string. The browser persists the script
+ *     URL, so this is available immediately on every wake-up.
+ *  2. IndexedDB (`rivium-push` / `config`), written by the SDK on every load.
+ *     This is the fallback for a worker registered WITHOUT the query string -
+ *     an app (or another library, or a hot reload in development) that calls
+ *     `navigator.serviceWorker.register('/rivium-push-sw.js')` itself. Such a
+ *     worker still shows notifications, but used to silently stop confirming
+ *     delivery and stop re-registering a changed subscription.
+ *
+ * The URL wins field by field, so an explicit registration still decides.
  */
-const RIVIUM_CONFIG = (() => {
+const RIVIUM_DB_NAME = 'rivium-push';
+const RIVIUM_DB_STORE = 'config';
+const RIVIUM_DB_KEY = 'config';
+const RIVIUM_DEFAULT_SERVER_URL = 'https://push-api.rivium.co';
+
+function riviumConfigFromUrl() {
   try {
     const params = new URL(self.location.href).searchParams;
     return {
       apiKey: params.get('riviumApiKey') || null,
-      serverUrl: params.get('riviumServerUrl') || 'https://push-api.rivium.co',
+      serverUrl: params.get('riviumServerUrl') || null,
       deviceId: params.get('riviumDeviceId') || null,
       // Added in 0.1.5. SDKs older than 0.1.5 don't pass it.
       sdkVersion: params.get('riviumSdkVersion') || null,
     };
   } catch (e) {
-    return { apiKey: null, serverUrl: 'https://push-api.rivium.co', deviceId: null, sdkVersion: null };
+    return { apiKey: null, serverUrl: null, deviceId: null, sdkVersion: null };
   }
-})();
+}
+
+/** The SDK's last known config, or null. Never rejects: storage may be unavailable. */
+function riviumConfigFromStorage() {
+  return new Promise((resolve) => {
+    let request;
+    try {
+      request = indexedDB.open(RIVIUM_DB_NAME, 1);
+    } catch (e) {
+      return resolve(null);
+    }
+    // The SDK creates the store; a worker that gets here first must not leave
+    // an empty database behind with a half-made schema.
+    request.onupgradeneeded = () => {
+      try {
+        request.result.createObjectStore(RIVIUM_DB_STORE);
+      } catch (e) {
+        /* already there */
+      }
+    };
+    request.onerror = () => resolve(null);
+    request.onsuccess = () => {
+      const db = request.result;
+      try {
+        const get = db.transaction(RIVIUM_DB_STORE, 'readonly').objectStore(RIVIUM_DB_STORE).get(RIVIUM_DB_KEY);
+        get.onsuccess = () => {
+          resolve(get.result || null);
+          db.close();
+        };
+        get.onerror = () => {
+          resolve(null);
+          db.close();
+        };
+      } catch (e) {
+        resolve(null);
+        db.close();
+      }
+    };
+  });
+}
+
+let riviumConfigPromise = null;
+
+/** Resolved config for this wake-up. Storage is read only when the URL is short of something. */
+function riviumConfig() {
+  const fromUrl = riviumConfigFromUrl();
+  if (fromUrl.apiKey && fromUrl.deviceId) {
+    return Promise.resolve({ ...fromUrl, serverUrl: fromUrl.serverUrl || RIVIUM_DEFAULT_SERVER_URL });
+  }
+  riviumConfigPromise = riviumConfigPromise || riviumConfigFromStorage();
+  return riviumConfigPromise.then((stored) => ({
+    apiKey: fromUrl.apiKey || (stored && stored.apiKey) || null,
+    serverUrl: fromUrl.serverUrl || (stored && stored.serverUrl) || RIVIUM_DEFAULT_SERVER_URL,
+    deviceId: fromUrl.deviceId || (stored && stored.deviceId) || null,
+    sdkVersion: fromUrl.sdkVersion || (stored && stored.sdkVersion) || null,
+  }));
+}
 
 /**
  * Confirm delivery to Rivium Push.
@@ -42,38 +112,47 @@ const RIVIUM_CONFIG = (() => {
  * Best-effort: a failure here must never stop the notification being shown.
  */
 function riviumReportDelivered(messageId) {
-  if (!messageId || !RIVIUM_CONFIG.apiKey || !RIVIUM_CONFIG.deviceId) {
-    console.warn('[RiviumPush SW] Delivery ack skipped — missing messageId or SDK config', {
-      messageId: messageId || null,
-      hasApiKey: !!RIVIUM_CONFIG.apiKey,
-      hasDeviceId: !!RIVIUM_CONFIG.deviceId,
-    });
+  if (!messageId) {
+    console.warn('[RiviumPush SW] Delivery ack skipped - the push carried no message id');
     return Promise.resolve();
   }
 
-  // No `keepalive`: event.waitUntil already holds the worker open, and
-  // keepalive is unreliable for fetches issued from a service worker.
-  return fetch(`${RIVIUM_CONFIG.serverUrl}/receipts/delivered`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': RIVIUM_CONFIG.apiKey,
-    },
-    body: JSON.stringify({ messageId, deviceId: RIVIUM_CONFIG.deviceId }),
-  })
-    .then((res) => {
-      // A non-2xx is a failure — resolving on it would hide the problem the
-      // same way the server used to hide an ack for a receipt that did not
-      // exist yet.
-      if (!res.ok) {
-        console.warn('[RiviumPush SW] Delivery ack rejected', res.status);
-        return;
-      }
-      console.log('[RiviumPush SW] Delivery confirmed', messageId);
+  return riviumConfig().then((config) => {
+    if (!config.apiKey || !config.deviceId) {
+      console.warn(
+        '[RiviumPush SW] Delivery ack skipped - no SDK config in the worker URL or in storage: ' +
+          (!config.apiKey ? 'apiKey' : '') +
+          (!config.apiKey && !config.deviceId ? ' and ' : '') +
+          (!config.deviceId ? 'deviceId' : '') +
+          ' missing. Register the worker through the SDK (init/register) so it can confirm delivery.',
+      );
+      return;
+    }
+
+    // No `keepalive`: event.waitUntil already holds the worker open, and
+    // keepalive is unreliable for fetches issued from a service worker.
+    return fetch(`${config.serverUrl}/receipts/delivered`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': config.apiKey,
+      },
+      body: JSON.stringify({ messageId, deviceId: config.deviceId }),
     })
-    .catch((err) => {
-      console.warn('[RiviumPush SW] Delivery ack failed:', err && err.message);
-    });
+      .then((res) => {
+        // A non-2xx is a failure - resolving on it would hide the problem the
+        // same way the server used to hide an ack for a receipt that did not
+        // exist yet.
+        if (!res.ok) {
+          console.warn('[RiviumPush SW] Delivery ack rejected', res.status);
+          return;
+        }
+        console.log('[RiviumPush SW] Delivery confirmed', messageId);
+      })
+      .catch((err) => {
+        console.warn('[RiviumPush SW] Delivery ack failed:', err && err.message);
+      });
+  });
 }
 
 // Install event
@@ -237,36 +316,43 @@ self.addEventListener('pushsubscriptionchange', (event) => {
       event.oldSubscription.options.applicationServerKey) ||
     null;
 
-  if (!applicationServerKey || !RIVIUM_CONFIG.apiKey || !RIVIUM_CONFIG.deviceId) {
-    console.warn(
-      '[RiviumPush SW] Cannot re-subscribe: missing VAPID key or SDK config',
-    );
+  if (!applicationServerKey) {
+    console.warn('[RiviumPush SW] Cannot re-subscribe: the old subscription carried no VAPID key');
     return;
   }
 
   event.waitUntil(
-    self.registration.pushManager
-      .subscribe({ userVisibleOnly: true, applicationServerKey })
-      .then((subscription) =>
-        fetch(`${RIVIUM_CONFIG.serverUrl}/devices/register`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': RIVIUM_CONFIG.apiKey,
-          },
-          body: JSON.stringify({
-            deviceId: RIVIUM_CONFIG.deviceId,
-            platform: 'web',
-            appIdentifier: self.location.origin,
-            webPushSubscription: subscription.toJSON(),
-            // 0.1.5: SDK identity (body, not header, to avoid a CORS preflight).
-            sdkName: 'web',
-            ...(RIVIUM_CONFIG.sdkVersion ? { sdkVersion: RIVIUM_CONFIG.sdkVersion } : {}),
-          }),
-        }),
-      )
-      .then(() => {
-        console.log('[RiviumPush SW] Re-subscribed and re-registered');
+    riviumConfig()
+      .then((config) => {
+        if (!config.apiKey || !config.deviceId) {
+          console.warn(
+            '[RiviumPush SW] Cannot re-subscribe: no SDK config in the worker URL or in storage',
+          );
+          return;
+        }
+        return self.registration.pushManager
+          .subscribe({ userVisibleOnly: true, applicationServerKey })
+          .then((subscription) =>
+            fetch(`${config.serverUrl}/devices/register`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'x-api-key': config.apiKey,
+              },
+              body: JSON.stringify({
+                deviceId: config.deviceId,
+                platform: 'web',
+                appIdentifier: self.location.origin,
+                webPushSubscription: subscription.toJSON(),
+                // 0.1.5: SDK identity (body, not header, to avoid a CORS preflight).
+                sdkName: 'web',
+                ...(config.sdkVersion ? { sdkVersion: config.sdkVersion } : {}),
+              }),
+            }),
+          )
+          .then(() => {
+            console.log('[RiviumPush SW] Re-subscribed and re-registered');
+          });
       })
       .catch((err) => {
         console.error('[RiviumPush SW] Re-subscribe failed:', err && err.message);

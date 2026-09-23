@@ -50,6 +50,25 @@ cp node_modules/@rivium/push-web/service-worker.js public/rivium-push-sw.js
 curl -o public/rivium-push-sw.js https://unpkg.com/@rivium/push-web/service-worker.js
 ```
 
+Let the SDK register it (`init()` does this for you). It registers the worker
+with its API key and device id on the URL, and mirrors the same values into
+IndexedDB under `rivium-push` / `config`.
+
+The worker needs those two values to confirm delivery and to re-register a
+subscription the browser replaces. It reads the URL first and falls back to
+storage, so it keeps working even when something else registered
+`/rivium-push-sw.js` without the query string - your own
+`navigator.serviceWorker.register` call, another library, or a hot reload in
+development. Nothing secret is stored: the API key is public and already in
+your page.
+
+Where IndexedDB is unavailable (private windows, blocked site data), only the
+URL is used, exactly as before. A worker with neither says so in the console:
+
+```
+[RiviumPush SW] Delivery ack skipped - no SDK config in the worker URL or in storage
+```
+
 ## Quick Start
 
 ```typescript

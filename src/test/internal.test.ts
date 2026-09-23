@@ -122,7 +122,10 @@ describe('detectDeviceInfo', () => {
 describe('SDK_VERSION', () => {
   it('matches package.json', async () => {
     const { readFileSync } = await import('node:fs');
-    const pkg = JSON.parse(readFileSync(new URL('../../package.json', import.meta.url), 'utf8'));
+    // ts-jest compiles this suite as CommonJS, where import.meta is a syntax
+    // error and the whole file fails to run. jest starts in the package root.
+    const { join } = await import('node:path');
+    const pkg = JSON.parse(readFileSync(join(process.cwd(), 'package.json'), 'utf8'));
     expect(SDK_VERSION).toBe(pkg.version);
   });
 });

@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-09-23
+
+### Fixed
+- Delivery confirmations are now sent whichever way the service worker was
+  registered. Previously only a worker registered by the SDK could confirm
+  delivery; one registered by the app itself could not, so its notifications
+  stayed at "sent" in the Console.
+- The same worker can now also re-register a push subscription the browser
+  replaces, instead of losing it.
+
 ## [0.1.7] - 2026-09-16
 
 ### Added
