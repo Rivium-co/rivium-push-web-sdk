@@ -649,6 +649,19 @@ declare class RiviumPush {
     private showRichNotification;
     private updateFaviconBadge;
     private setConnectionState;
+    /**
+     * The id the BACKEND uses in MQTT topics: the first 16 characters of the
+     * project id, returned as `appId` by /devices/register.
+     *
+     * Channels were built from the API key prefix instead, so every channel this
+     * SDK streamed from was one nothing is ever published to - the real-time
+     * path silently delivered nothing on web, from 0.1.0 until 0.1.9. It went
+     * unnoticed because Web Push carried every message on its own.
+     *
+     * The API key prefix stays as the fallback for a backend old enough not to
+     * return `appId`; the native SDKs do exactly the same.
+     */
+    private topicAppId;
     private getOrCreateDeviceId;
     private generateUUID;
     private urlBase64ToUint8Array;

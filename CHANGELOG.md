@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-09-23
+
+### Fixed
+- Real-time messages now reach the browser. The SDK listened on a different
+  channel from the one the server sends on, so nothing ever arrived over the
+  real-time connection and every notification depended on Web Push alone.
+- A message that arrives over both paths no longer shows two notifications.
+
 ## [0.1.8] - 2026-09-23
 
 ### Fixed

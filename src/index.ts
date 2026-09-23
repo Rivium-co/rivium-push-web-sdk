@@ -661,6 +661,9 @@ class RiviumPush {
     // Restore previously-issued subscriptionId so we can stream the new topic
     // immediately on page load — register() will refresh it.
     this.subscriptionId = localStorage.getItem('rivium_push_subscription_id') || null;
+    // Same for the backend's topic id, so the first connection of a page load
+    // streams from the channel the backend publishes to (see topicAppId).
+    this.appId = localStorage.getItem('rivium_push_app_id') || null;
     // Restore the userId set in a previous session so we can re-register with
     // the right user identity automatically (matches OneSignal/Airship).
     this.userId = localStorage.getItem('rivium_push_user_id') || null;
@@ -1001,8 +1004,7 @@ class RiviumPush {
 
     // Also subscribe via MQTT for real-time foreground messages
     if (this.pnSocket && this.pnSocket.isConnected()) {
-      const appId = this.config.apiKey.substring(0, 16);
-      const channel = `rivium_push/${appId}/topic/${topic}`;
+      const channel = `rivium_push/${this.topicAppId()}/topic/${topic}`;
       this.pnSocket.stream(channel, (message: PNMessage) => {
         this.handlePNMessage(message);
       }, this.config.mqttQos as PNDeliveryMode);
@@ -1034,8 +1036,7 @@ class RiviumPush {
     }
 
     if (this.pnSocket && this.pnSocket.isConnected()) {
-      const appId = this.config.apiKey.substring(0, 16);
-      const channel = `rivium_push/${appId}/topic/${topic}`;
+      const channel = `rivium_push/${this.topicAppId()}/topic/${topic}`;
       this.pnSocket.detach(channel);
       this.log(RiviumPushLogLevel.INFO, 'Unsubscribed from topic:', topic);
       this.trackEvent(RiviumPushAnalyticsEvent.TOPIC_UNSUBSCRIBED, { topic });
@@ -1736,9 +1737,16 @@ class RiviumPush {
 
       this.saveRegistrationState(options?.userId ?? null);
 
-      // Store appId for topic subscriptions
+      // Store appId for topic subscriptions, and persist it: a page that
+      // reconnects before register() finishes would otherwise fall back to the
+      // API key prefix and stream from a channel nobody publishes to.
       if (data.appId) {
         this.appId = data.appId;
+        try {
+          localStorage.setItem('rivium_push_app_id', data.appId);
+        } catch {
+          // Storage blocked — register() sets it again on the next load.
+        }
       }
 
       // Capture subscriptionId — the per-install UUID — and persist it.
@@ -1835,7 +1843,7 @@ class RiviumPush {
         this.reconnectAttempts = 0;
         this.trackEvent(RiviumPushAnalyticsEvent.CONNECTED);
 
-        const appId = this.config.apiKey.substring(0, 16);
+        const appId = this.topicAppId();
         const appIdentifier = this.appIdentifier || (typeof window !== 'undefined' ? window.location.origin : '_default');
 
         // Per-install subscription channel — primary delivery channel for
@@ -2358,7 +2366,10 @@ class RiviumPush {
       icon: message.iconUrl || message.icon,
       badge: message.iconUrl || message.icon,
       image: message.imageUrl || message.image,
-      tag: message.tag || message.collapseKey || message.threadId,
+      // Falls back to the message id, exactly as the service worker does: the
+      // same push can arrive over both transports, and a shared tag makes the
+      // second replace the first instead of showing a second notification.
+      tag: message.tag || message.collapseKey || message.threadId || message.messageId,
       data: {
         ...message.data,
         deepLink: message.deepLink,
@@ -2462,6 +2473,22 @@ class RiviumPush {
     if (this.onConnectionStateCallback) {
       this.onConnectionStateCallback(state);
     }
+  }
+
+  /**
+   * The id the BACKEND uses in MQTT topics: the first 16 characters of the
+   * project id, returned as `appId` by /devices/register.
+   *
+   * Channels were built from the API key prefix instead, so every channel this
+   * SDK streamed from was one nothing is ever published to - the real-time
+   * path silently delivered nothing on web, from 0.1.0 until 0.1.9. It went
+   * unnoticed because Web Push carried every message on its own.
+   *
+   * The API key prefix stays as the fallback for a backend old enough not to
+   * return `appId`; the native SDKs do exactly the same.
+   */
+  private topicAppId(): string {
+    return this.appId || this.config.apiKey.substring(0, 16);
   }
 
   private getOrCreateDeviceId(): string {
