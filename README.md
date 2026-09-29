@@ -106,7 +106,7 @@ const riviumPush = new RiviumPush({
   serviceWorkerPath: '/rivium-push-sw.js',  // Optional - service worker path
   autoRegisterServiceWorker: true,          // Optional - auto register SW (default: true)
   mqttQos: 1,                              // Optional - MQTT QoS level (default: 1)
-  maxReconnectAttempts: 10,                 // Optional - max reconnect attempts (default: 10)
+  maxReconnectAttempts: 0,                  // Optional - max reconnect attempts (default: 0 = keep trying)
   logLevel: RiviumPushLogLevel.ERROR,       // Optional - log level
   appVersion: '2.0.0',                      // Optional - your app version (segment filter)
   autoRefresh: true,                        // Optional - background re-registration (default: true)

@@ -35,6 +35,18 @@ import {
 } from './internal';
 import { RiviumInbox } from './inbox';
 import { InAppMessages, type InAppConfig } from './in-app';
+import {
+  DEFAULT_MQTT_PATH,
+  EndpointMemory,
+  MqttEndpoint,
+  PROBE_AFTER_HIDDEN_MS,
+  PROBE_AFTER_SILENCE_MS,
+  PROBE_TIMEOUT_MS,
+  ReconnectThrottle,
+  networkKey,
+  orderEndpoints,
+  parseMqttEndpoints,
+} from './connection';
 
 export { SDK_NAME, SDK_VERSION };
 export { RiviumInbox } from './inbox';
@@ -326,7 +338,10 @@ export interface RiviumPushConfig {
   autoRegisterServiceWorker?: boolean;
   /** MQTT QoS level (default: 1) */
   mqttQos?: 0 | 1 | 2;
-  /** Maximum reconnect attempts (default: 10) */
+  /**
+   * Maximum reconnect attempts after the real-time connection drops
+   * (default: 0 = keep trying while registered, backing off up to 60 s).
+   */
   maxReconnectAttempts?: number;
   /** Initial log level (default: DEBUG in dev, ERROR in prod) */
   logLevel?: RiviumPushLogLevel;
@@ -551,9 +566,17 @@ class RiviumPush {
   private serviceWorkerRegistration: ServiceWorkerRegistration | null = null;
   private pushSubscription: PushSubscription | null = null;
   private connectionState: ConnectionState = 'disconnected';
-  private reconnectAttempts = 0;
-  private maxReconnectAttempts = 10;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private maxReconnectAttempts = 0;
+  // Real-time connection lifecycle (set while the SDK keeps a connection up)
+  private connectionStarted = false;
+  private configRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  private configRetryAttempt = 0;
+  private tokenRefreshInFlight = false;
+  private hiddenAt: number | null = null;
+  private readonly reconnectThrottle = new ReconnectThrottle();
+  private readonly endpointMemory = new EndpointMemory();
+  private serverEndpoints: MqttEndpoint[] | null = null;
+  private lifecycleListeners: Array<{ target: EventTarget; type: string; handler: EventListener }> = [];
   private subscribedTopics: Set<string> = new Set();
   private badgeCount = 0;
   private initialized = false;
@@ -617,7 +640,7 @@ class RiviumPush {
       autoRegisterServiceWorker: true,
       autoRefresh: true,
       mqttQos: 1,
-      maxReconnectAttempts: 10,
+      maxReconnectAttempts: 0,
       logLevel: RiviumPushLogLevel.ERROR,
       ...config,
     };
@@ -1407,12 +1430,7 @@ class RiviumPush {
   private handleOnline(): void {
     this.log(RiviumPushLogLevel.INFO, 'Network online');
     this.handleNetworkChange();
-
-    // Reconnect if disconnected
-    if (this.connectionState === 'disconnected' && this.deviceId) {
-      this.log(RiviumPushLogLevel.INFO, 'Reconnecting after network restored');
-      this.connectToGateway();
-    }
+    // Reconnecting is handled by the connection lifecycle listeners.
   }
 
   private handleOffline(): void {
@@ -1432,19 +1450,8 @@ class RiviumPush {
       isVisible: state.isVisible,
       visibilityState: state.visibilityState,
     });
-
-    // Reconnect immediately when the app is foregrounded. Reset the backoff
-    // counter first — any exponential delay from failed background retries
-    // is stale now that iOS lets us run again.
-    if (state.isVisible && (this.connectionState === 'disconnected' || this.connectionState === 'error') && this.deviceId) {
-      this.reconnectAttempts = 0;
-      if (this.reconnectTimer) {
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = null;
-      }
-      this.log(RiviumPushLogLevel.INFO, 'Reconnecting after becoming visible');
-      this.connectToGateway();
-    }
+    // Reconnecting when the page comes back is handled by the connection
+    // lifecycle listeners (see startConnectionLifecycle).
   }
 
   // ==========================================================================
@@ -1779,11 +1786,21 @@ class RiviumPush {
         this.appIdentifier = data.appIdentifier;
       }
 
+      // The config fetch may have failed; the register response carries the
+      // same gateway fields, so use them rather than losing the token.
+      if (!this.mqttConfig && data.mqtt && (data.mqtt.wsHost || data.mqtt.host) && data.mqtt.wsPort) {
+        this.mqttConfig = { ...data.mqtt };
+      }
+
       // Store connection token from registration response
       if (data.mqtt?.token && this.mqttConfig) {
         this.mqttConfig.token = data.mqtt.token;
         this.log(RiviumPushLogLevel.DEBUG, 'Connection token received from registration');
       }
+
+      // Optional failover endpoints. Absent = default endpoint only (clears any old list).
+      this.serverEndpoints = parseMqttEndpoints(data.mqttEndpoints, DEFAULT_MQTT_PATH);
+      this.endpointMemory.saveServerEndpoints(this.serverEndpoints);
 
       return data;
     } catch (error) {
@@ -1796,21 +1813,44 @@ class RiviumPush {
   // Private Methods - PN Protocol Connection
   // ==========================================================================
 
+  /** Today's default gateway: `wsHost`/`wsPort` from the config, path /mqtt. */
+  private defaultEndpoint(): MqttEndpoint | null {
+    if (!this.mqttConfig) return null;
+    // Use wsHost for WebSocket connections (via Cloudflare), fallback to host
+    const host = this.mqttConfig.wsHost || this.mqttConfig.host;
+    const port = this.mqttConfig.wsPort;
+    if (!host || !port) return null;
+    // Determine if secure connection is needed
+    const isSecurePage = typeof window !== 'undefined' && window.location.protocol === 'https:';
+    const secure = isSecurePage || port === 443;
+    return { host, port, secure, path: DEFAULT_MQTT_PATH };
+  }
+
+  /**
+   * Endpoints for one connection round: the one that last worked on this
+   * connection type, then the server list, then the default last.
+   */
+  private endpointsForRound(): MqttEndpoint[] {
+    const fallback = this.defaultEndpoint();
+    let server = this.serverEndpoints ?? this.endpointMemory.serverEndpoints();
+    // An https page cannot open ws:// connections (mixed content).
+    if (typeof window !== 'undefined' && window.location.protocol === 'https:') {
+      server = server.filter((e) => e.secure);
+    }
+    return orderEndpoints(server, fallback, this.endpointMemory.winner(networkKey()));
+  }
+
   private connectToGateway(): void {
+    // Never two connections at once: drop the previous socket first
     if (this.pnSocket) {
       this.pnSocket.close();
+      this.pnSocket = null;
     }
-
-    // Clear any pending reconnect timer
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.clearConfigRetry();
 
     // Check if config is available
     if (!this.mqttConfig) {
-      this.log(RiviumPushLogLevel.WARNING, 'Gateway config not available, retrying in 2s...');
-      setTimeout(() => this.connectToGateway(), 2000);
+      this.scheduleConfigRetry();
       return;
     }
 
@@ -1821,99 +1861,94 @@ class RiviumPush {
       return;
     }
 
+    const fallback = this.defaultEndpoint();
+    if (!fallback) {
+      this.log(RiviumPushLogLevel.ERROR, 'Gateway config incomplete');
+      this.emitError(RiviumPushErrorCode.INVALID_CONFIG, 'Gateway config incomplete');
+      return;
+    }
+
     this.setConnectionState('connecting');
-
-    // Use wsHost for WebSocket connections (via Cloudflare), fallback to host
-    const gateway = this.mqttConfig.wsHost || this.mqttConfig.host;
-    const port = this.mqttConfig.wsPort;
-
-    // Determine if secure connection is needed
-    const isSecurePage = typeof window !== 'undefined' && window.location.protocol === 'https:';
-    const isSecurePort = port === 443;
-    const secure = isSecurePage || isSecurePort;
-
-    this.log(RiviumPushLogLevel.DEBUG, `Connecting to gateway (secure: ${secure})`);
+    this.log(RiviumPushLogLevel.DEBUG, `Connecting to gateway (secure: ${fallback.secure})`);
 
     const clientId = `rivium_push_${this.appId}_${this.deviceId}`;
 
-    // Build PNConfig using the protocol's builder
+    // Build PNConfig using the protocol's builder. The socket owns reconnection:
+    // backoff 1 s .. 60 s with jitter, endpoint failover, 30 s keepalive.
     const pnConfig = new PNConfigBuilder()
-      .gateway(gateway)
-      .port(port)
+      .gateway(fallback.host)
+      .port(fallback.port)
       .clientId(clientId)
       .auth(PNAuthFactory.token(this.mqttConfig.token))
-      .secure(secure)
+      .secure(fallback.secure)
+      .wsPath(fallback.path)
       .freshStart(false)
-      .autoReconnect(false) // We handle reconnection ourselves
+      .heartbeatInterval(30)
+      .autoReconnect(true)
+      .maxReconnectAttempts(this.maxReconnectAttempts)
+      .reconnectDelay(1000)
+      .maxReconnectDelay(60000)
       .connectionTimeout(10)
       .build();
 
-    this.pnSocket = new PNSocket(pnConfig);
+    const socket = new PNSocket(pnConfig);
+    this.pnSocket = socket;
 
-    // Set up connection listener
+    socket.setEndpointProvider(() => this.endpointsForRound());
+    socket.addEndpointListener((endpoint) => {
+      this.endpointMemory.saveWinner(networkKey(), endpoint as MqttEndpoint);
+    });
+
+    // Set up connection listener. Every callback checks it still belongs to
+    // the current socket, so a replaced socket can never act.
+    const isCurrent = () => this.pnSocket === socket;
     const connectionListener: PNConnectionListener = {
       onStateChanged: (state: PNState) => {
+        if (!isCurrent()) return;
         this.log(RiviumPushLogLevel.DEBUG, `Connection state changed: ${state}`);
+        if (state === PNState.CONNECTING && this.connectionState !== 'connecting') {
+          this.setConnectionState('connecting');
+        }
       },
       onConnected: () => {
+        if (!isCurrent()) return;
         this.log(RiviumPushLogLevel.INFO, 'Connected to gateway');
         this.setConnectionState('connected');
-        this.reconnectAttempts = 0;
         this.trackEvent(RiviumPushAnalyticsEvent.CONNECTED);
-
-        const appId = this.topicAppId();
-        const appIdentifier = this.appIdentifier || (typeof window !== 'undefined' ? window.location.origin : '_default');
-
-        // Per-install subscription channel — primary delivery channel for
-        // every device-targeted message after the subscriptionId migration.
-        if (this.subscriptionId) {
-          const subscriptionChannel = `rivium_push/${appId}/sub/${this.subscriptionId}`;
-          this.pnSocket!.stream(subscriptionChannel, (message: PNMessage) => {
-            this.handlePNMessage(message);
-          }, this.config.mqttQos as PNDeliveryMode);
-          this.log(RiviumPushLogLevel.DEBUG, `Streaming from subscription channel ${subscriptionChannel}`);
-        }
-
-        // Stream broadcast channel
-        const broadcastChannel = `rivium_push/${appId}/broadcast`;
-        this.pnSocket!.stream(broadcastChannel, (message: PNMessage) => {
-          this.handlePNMessage(message);
-        }, this.config.mqttQos as PNDeliveryMode);
-        this.log(RiviumPushLogLevel.DEBUG, 'Streaming from broadcast channel');
-
-        // DEPRECATED: legacy device-scoped channel. The backend stopped
-        // publishing here after the subscriptionId migration. Kept streamed
-        // only to keep older test builds / out-of-tree backends working;
-        // will be removed in a future SDK release.
-        const deviceChannel = `rivium_push/${appId}/${this.deviceId}/${appIdentifier}`;
-        this.pnSocket!.stream(deviceChannel, (message: PNMessage) => {
-          this.handlePNMessage(message);
-        }, this.config.mqttQos as PNDeliveryMode);
-        this.log(RiviumPushLogLevel.DEBUG, 'Streaming from (deprecated) device channel');
-
-        // Resubscribe to custom topics
-        this.subscribedTopics.forEach((topic) => {
-          const topicChannel = `rivium_push/${appId}/topic/${topic}`;
-          this.pnSocket!.stream(topicChannel, (message: PNMessage) => {
-            this.handlePNMessage(message);
-          }, this.config.mqttQos as PNDeliveryMode);
-        });
+        this.streamChannels(socket);
       },
       onDisconnected: (reason?: string) => {
+        if (!isCurrent()) return;
         this.log(RiviumPushLogLevel.INFO, 'Disconnected from gateway', reason || '');
         this.setConnectionState('disconnected');
         this.trackEvent(RiviumPushAnalyticsEvent.DISCONNECTED);
-        this.scheduleReconnect();
       },
       onReconnecting: (attempt: number, nextRetryMs: number) => {
-        this.log(RiviumPushLogLevel.INFO, `Reconnecting attempt ${attempt} in ${nextRetryMs}ms`);
+        if (!isCurrent()) return;
+        if (this.connectionState === 'connected' || this.connectionState === 'connecting') {
+          this.setConnectionState('disconnected');
+        }
+        this.log(RiviumPushLogLevel.INFO, `Reconnecting in ${nextRetryMs}ms (attempt ${attempt + 1})`);
+        const reconnectionState: ReconnectionState = {
+          retryAttempt: attempt + 1,
+          nextRetryMs,
+          maxRetryAttempts: this.maxReconnectAttempts,
+        };
+        if (this.onReconnectingCallback) {
+          this.onReconnectingCallback(reconnectionState);
+        }
+        this.trackEvent(RiviumPushAnalyticsEvent.RETRY_STARTED, {
+          retryAttempt: attempt + 1,
+          nextRetryMs,
+        });
       },
     };
 
-    this.pnSocket.addConnectionListener(connectionListener);
+    socket.addConnectionListener(connectionListener);
 
     // Set up error listener
-    this.pnSocket.addErrorListener((error: PNProtocolError) => {
+    socket.addErrorListener((error: PNProtocolError) => {
+      if (!isCurrent()) return;
       // Connection errors while backgrounded (iOS/Safari suspending the
       // PWA) are expected, not real errors. Log them at DEBUG so devtools
       // isn't flooded with red during normal background behavior.
@@ -1933,16 +1968,11 @@ class RiviumPush {
         errorCode = RiviumPushErrorCode.CONNECTION_TIMEOUT;
       } else if (errorMessage.includes('refused') || errorMessage.includes('not authorized')) {
         errorCode = RiviumPushErrorCode.CONNECTION_REFUSED;
-        // Token might be expired - try to refresh it
+        // Token might be expired - try to refresh it. The socket does not fail
+        // over to another endpoint on a rejection; it backs off until the new
+        // token is in place and reconnectImmediately() is called.
         if (errorMessage.includes('not authorized')) {
-          this.log(RiviumPushLogLevel.INFO, 'Token may be expired, attempting refresh...');
-          this.refreshMqttToken().then(() => {
-            this.log(RiviumPushLogLevel.INFO, 'Token refreshed, reconnecting...');
-            this.connectToGateway();
-          }).catch((refreshError) => {
-            this.log(RiviumPushLogLevel.ERROR, 'Token refresh failed:', refreshError);
-            this.emitError(RiviumPushErrorCode.AUTHENTICATION_FAILED, 'Token expired and refresh failed');
-          });
+          this.refreshTokenAndReconnect(socket);
           return;
         }
       } else if (errorMessage.includes('auth') || errorMessage.includes('credential')) {
@@ -1954,9 +1984,197 @@ class RiviumPush {
       this.emitError(errorCode, error.message);
     });
 
+    this.connectionStarted = true;
+    this.startConnectionLifecycle();
+
     // Open connection
     this.log(RiviumPushLogLevel.DEBUG, 'Opening connection to gateway...');
-    this.pnSocket.open();
+    socket.open();
+  }
+
+  /**
+   * Stream the device, broadcast and topic channels. The socket keeps its
+   * channels across reconnects and resubscribes them itself, so only channels
+   * it does not have yet are added.
+   */
+  private streamChannels(socket: PNSocket): void {
+    const active = socket.getActiveChannels();
+    const streamOnce = (channel: string) => {
+      if (active.has(channel)) return;
+      socket.stream(channel, (message: PNMessage) => {
+        this.handlePNMessage(message);
+      }, this.config.mqttQos as PNDeliveryMode);
+      active.add(channel);
+    };
+
+    const appId = this.topicAppId();
+    const appIdentifier = this.appIdentifier || (typeof window !== 'undefined' ? window.location.origin : '_default');
+
+    // Per-install subscription channel — primary delivery channel for
+    // every device-targeted message after the subscriptionId migration.
+    if (this.subscriptionId) {
+      const subscriptionChannel = `rivium_push/${appId}/sub/${this.subscriptionId}`;
+      streamOnce(subscriptionChannel);
+      this.log(RiviumPushLogLevel.DEBUG, `Streaming from subscription channel ${subscriptionChannel}`);
+    }
+
+    // Stream broadcast channel
+    streamOnce(`rivium_push/${appId}/broadcast`);
+    this.log(RiviumPushLogLevel.DEBUG, 'Streaming from broadcast channel');
+
+    // DEPRECATED: legacy device-scoped channel. The backend stopped
+    // publishing here after the subscriptionId migration. Kept streamed
+    // only to keep older test builds / out-of-tree backends working;
+    // will be removed in a future SDK release.
+    streamOnce(`rivium_push/${appId}/${this.deviceId}/${appIdentifier}`);
+    this.log(RiviumPushLogLevel.DEBUG, 'Streaming from (deprecated) device channel');
+
+    // Resubscribe to custom topics
+    this.subscribedTopics.forEach((topic) => {
+      streamOnce(`rivium_push/${appId}/topic/${topic}`);
+    });
+  }
+
+  /** "Not authorized": fetch a fresh token, then reconnect the same socket with it. */
+  private refreshTokenAndReconnect(socket: PNSocket): void {
+    if (this.tokenRefreshInFlight) return;
+    this.tokenRefreshInFlight = true;
+    this.log(RiviumPushLogLevel.INFO, 'Token may be expired, attempting refresh...');
+    this.refreshMqttToken()
+      .then(() => {
+        if (this.pnSocket !== socket || !this.mqttConfig?.token) return;
+        this.log(RiviumPushLogLevel.INFO, 'Token refreshed, reconnecting...');
+        socket.updateAuth(PNAuthFactory.token(this.mqttConfig.token));
+        socket.reconnectImmediately();
+      })
+      .catch((refreshError) => {
+        this.log(RiviumPushLogLevel.ERROR, 'Token refresh failed:', refreshError);
+        this.emitError(RiviumPushErrorCode.AUTHENTICATION_FAILED, 'Token expired and refresh failed');
+      })
+      .finally(() => {
+        this.tokenRefreshInFlight = false;
+      });
+  }
+
+  /** Config fetch failed earlier: fetch it again with backoff, then connect. */
+  private scheduleConfigRetry(): void {
+    const delay = Math.min(2000 * Math.pow(2, this.configRetryAttempt), 60000);
+    this.configRetryAttempt++;
+    this.log(RiviumPushLogLevel.WARNING, `Gateway config not available, retrying in ${delay}ms...`);
+    this.connectionStarted = true;
+    this.startConnectionLifecycle();
+    this.configRetryTimer = setTimeout(async () => {
+      this.configRetryTimer = null;
+      if (!this.connectionStarted) return;
+      if (!this.mqttConfig) await this.fetchMqttConfig();
+      if (!this.connectionStarted || this.configRetryTimer) return;
+      if (this.mqttConfig && !this.mqttConfig.token) {
+        // A fresh config has no token: register() has to run again.
+        this.log(RiviumPushLogLevel.WARNING, 'Gateway config fetched without a token; call register() again');
+        return;
+      }
+      this.connectToGateway();
+    }, delay);
+  }
+
+  private clearConfigRetry(): void {
+    if (this.configRetryTimer) {
+      clearTimeout(this.configRetryTimer);
+      this.configRetryTimer = null;
+    }
+  }
+
+  // ==========================================================================
+  // Private Methods - Connection lifecycle (online / visible / focus / pageshow)
+  // ==========================================================================
+
+  /** Attach the reconnect triggers once per started connection. */
+  private startConnectionLifecycle(): void {
+    if (this.lifecycleListeners.length > 0 || typeof window === 'undefined') return;
+    const add = (target: EventTarget | undefined, type: string, handler: EventListener) => {
+      if (!target) return;
+      target.addEventListener(type, handler);
+      this.lifecycleListeners.push({ target, type, handler });
+    };
+    this.hiddenAt = typeof document !== 'undefined' && document.hidden ? Date.now() : null;
+
+    add(window, 'online', () => this.onLifecycleTrigger('online'));
+    add(window, 'focus', () => this.onLifecycleTrigger('focus'));
+    add(window, 'pageshow', (event: Event) => {
+      this.onLifecycleTrigger((event as PageTransitionEvent).persisted ? 'pageshow-restored' : 'pageshow');
+    });
+    if (typeof document !== 'undefined') {
+      add(document, 'visibilitychange', () => {
+        if (document.visibilityState === 'hidden') {
+          if (this.hiddenAt === null) this.hiddenAt = Date.now();
+          return;
+        }
+        this.onLifecycleTrigger('visible');
+      });
+    }
+  }
+
+  /** Remove the reconnect triggers (disconnect / unregister). */
+  private stopConnectionLifecycle(): void {
+    for (const { target, type, handler } of this.lifecycleListeners) {
+      target.removeEventListener(type, handler);
+    }
+    this.lifecycleListeners = [];
+    this.hiddenAt = null;
+    this.reconnectThrottle.reset();
+  }
+
+  /**
+   * The page came back (visible, focus, bfcache restore) or the network did.
+   * Waiting to retry: connect now with the backoff reset. Connected: if the
+   * page was away long enough for the connection to have died silently,
+   * check it and replace it when it does not answer.
+   */
+  private onLifecycleTrigger(reason: string): void {
+    if (!this.connectionStarted) return;
+    if (typeof document !== 'undefined' && document.visibilityState === 'hidden' && reason !== 'online') return;
+
+    const hiddenFor = this.hiddenAt === null ? 0 : Date.now() - this.hiddenAt;
+    if (reason !== 'online') this.hiddenAt = null;
+
+    if (!this.reconnectThrottle.tryAcquire()) {
+      this.log(RiviumPushLogLevel.DEBUG, `Reconnect trigger (${reason}) debounced`);
+      return;
+    }
+
+    const socket = this.pnSocket;
+    if (!socket) {
+      // Waiting for the gateway config: try it now.
+      if (this.configRetryTimer) {
+        this.configRetryAttempt = 0;
+        this.clearConfigRetry();
+        this.connectToGateway();
+      }
+      return;
+    }
+
+    switch (socket.state) {
+      case PNState.CONNECTED: {
+        const lastActivity = socket.lastActivityAt();
+        const silentFor = lastActivity > 0 ? Date.now() - lastActivity : 0;
+        const suspect =
+          reason === 'online' ||
+          reason === 'pageshow-restored' ||
+          hiddenFor >= PROBE_AFTER_HIDDEN_MS ||
+          silentFor >= PROBE_AFTER_SILENCE_MS;
+        if (suspect) {
+          this.log(RiviumPushLogLevel.DEBUG, `Reconnect trigger (${reason}) - checking the connection`);
+          socket.probe(PROBE_TIMEOUT_MS).catch(() => undefined);
+        }
+        break;
+      }
+      case PNState.CONNECTING:
+      case PNState.DISCONNECTING:
+        break;
+      default:
+        this.log(RiviumPushLogLevel.INFO, `Reconnect trigger (${reason}) - reconnecting now`);
+        socket.reconnectImmediately();
+    }
   }
 
   /**
@@ -1973,63 +2191,18 @@ class RiviumPush {
   }
 
   private disconnectFromGateway(): void {
-    if (this.reconnectTimer) {
-      clearTimeout(this.reconnectTimer);
-      this.reconnectTimer = null;
-    }
+    this.connectionStarted = false;
+    this.clearConfigRetry();
+    this.configRetryAttempt = 0;
+    this.stopConnectionLifecycle();
 
     if (this.pnSocket) {
-      this.pnSocket.close();
+      const socket = this.pnSocket;
       this.pnSocket = null;
+      socket.close();
     }
 
     this.setConnectionState('disconnected');
-  }
-
-  private scheduleReconnect(): void {
-    if (this.reconnectAttempts >= this.maxReconnectAttempts) {
-      this.log(RiviumPushLogLevel.WARNING, 'Max reconnect attempts reached');
-      this.emitError(RiviumPushErrorCode.CONNECTION_FAILED, 'Max reconnect attempts reached');
-      return;
-    }
-
-    // Skip reconnect when offline OR when the tab/PWA is hidden. iOS Safari
-    // aggressively suspends background PWAs — retrying just produces
-    // Server-busy / connack-timeout noise. handleVisibilityChange kicks off
-    // a fresh reconnect the moment the app is foregrounded again.
-    if (!navigator.onLine) {
-      this.log(RiviumPushLogLevel.DEBUG, 'Offline, skipping reconnect');
-      return;
-    }
-    if (typeof document !== 'undefined' && document.hidden) {
-      this.log(RiviumPushLogLevel.DEBUG, 'App hidden, skipping reconnect (will retry on visibilitychange)');
-      return;
-    }
-
-    const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts), 30000);
-    this.reconnectAttempts++;
-
-    this.log(RiviumPushLogLevel.INFO, `Reconnecting in ${delay}ms (attempt ${this.reconnectAttempts}/${this.maxReconnectAttempts})`);
-
-    // Emit reconnecting state
-    const reconnectionState: ReconnectionState = {
-      retryAttempt: this.reconnectAttempts,
-      nextRetryMs: delay,
-      maxRetryAttempts: this.maxReconnectAttempts,
-    };
-
-    if (this.onReconnectingCallback) {
-      this.onReconnectingCallback(reconnectionState);
-    }
-
-    this.trackEvent(RiviumPushAnalyticsEvent.RETRY_STARTED, {
-      retryAttempt: this.reconnectAttempts,
-      nextRetryMs: delay,
-    });
-
-    this.reconnectTimer = setTimeout(() => {
-      this.connectToGateway();
-    }, delay);
   }
 
   private handleMqttMessage(topic: string, data: any): void {

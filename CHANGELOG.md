@@ -5,6 +5,25 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.11] - 2026-09-29
+
+### Changed
+- The real-time connection recovers faster and keeps trying while the page is
+  open: retries back off from 1 s to at most 60 s and no longer stop after 10
+  attempts (`maxReconnectAttempts` now defaults to 0, meaning no limit).
+- Keepalive is 30 s, so a dead connection is noticed sooner.
+- The connection comes back right away when the network returns, the tab
+  becomes visible or focused, or the page is restored from the back/forward
+  cache. After the page was in the background for a while, the SDK checks the
+  connection is still alive and replaces it if not.
+- Only one connection is ever open at a time.
+- Requires `@rivium/pn-protocol` 0.1.1.
+
+### Added
+- Support for alternative real-time endpoints sent by the server, with
+  automatic failover and memory of the one that last worked. Nothing to
+  configure; without them the SDK behaves as before.
+
 ## [0.1.10] - 2026-09-23
 
 ### Added

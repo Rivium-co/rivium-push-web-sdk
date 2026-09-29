@@ -1,6 +1,6 @@
 {
   "name": "@rivium/push-web",
-  "version": "0.1.10",
+  "version": "0.1.11",
   "description": "Web Push SDK for browsers - Firebase alternative that works everywhere",
   "type": "module",
   "main": "dist/index.js",
@@ -55,6 +55,6 @@
     "typescript": "^5.0.0"
   },
   "dependencies": {
-    "@rivium/pn-protocol": "^0.1.0"
+    "@rivium/pn-protocol": "^0.1.1"
   }
 }

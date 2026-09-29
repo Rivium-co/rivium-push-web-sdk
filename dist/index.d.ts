@@ -194,7 +194,10 @@ export interface RiviumPushConfig {
     autoRegisterServiceWorker?: boolean;
     /** MQTT QoS level (default: 1) */
     mqttQos?: 0 | 1 | 2;
-    /** Maximum reconnect attempts (default: 10) */
+    /**
+     * Maximum reconnect attempts after the real-time connection drops
+     * (default: 0 = keep trying while registered, backing off up to 60 s).
+     */
     maxReconnectAttempts?: number;
     /** Initial log level (default: DEBUG in dev, ERROR in prod) */
     logLevel?: RiviumPushLogLevel;
@@ -366,9 +369,16 @@ declare class RiviumPush {
     private serviceWorkerRegistration;
     private pushSubscription;
     private connectionState;
-    private reconnectAttempts;
     private maxReconnectAttempts;
-    private reconnectTimer;
+    private connectionStarted;
+    private configRetryTimer;
+    private configRetryAttempt;
+    private tokenRefreshInFlight;
+    private hiddenAt;
+    private readonly reconnectThrottle;
+    private readonly endpointMemory;
+    private serverEndpoints;
+    private lifecycleListeners;
     private subscribedTopics;
     private badgeCount;
     private initialized;
@@ -624,13 +634,41 @@ declare class RiviumPush {
      */
     private captureDeviceAttributes;
     private registerDevice;
+    /** Today's default gateway: `wsHost`/`wsPort` from the config, path /mqtt. */
+    private defaultEndpoint;
+    /**
+     * Endpoints for one connection round: the one that last worked on this
+     * connection type, then the server list, then the default last.
+     */
+    private endpointsForRound;
     private connectToGateway;
+    /**
+     * Stream the device, broadcast and topic channels. The socket keeps its
+     * channels across reconnects and resubscribes them itself, so only channels
+     * it does not have yet are added.
+     */
+    private streamChannels;
+    /** "Not authorized": fetch a fresh token, then reconnect the same socket with it. */
+    private refreshTokenAndReconnect;
+    /** Config fetch failed earlier: fetch it again with backoff, then connect. */
+    private scheduleConfigRetry;
+    private clearConfigRetry;
+    /** Attach the reconnect triggers once per started connection. */
+    private startConnectionLifecycle;
+    /** Remove the reconnect triggers (disconnect / unregister). */
+    private stopConnectionLifecycle;
+    /**
+     * The page came back (visible, focus, bfcache restore) or the network did.
+     * Waiting to retry: connect now with the backoff reset. Connected: if the
+     * page was away long enough for the connection to have died silently,
+     * check it and replace it when it does not answer.
+     */
+    private onLifecycleTrigger;
     /**
      * Handle incoming PNMessage from the protocol layer
      */
     private handlePNMessage;
     private disconnectFromGateway;
-    private scheduleReconnect;
     private handleMqttMessage;
     /**
      * POST /receipts/delivered for a message received on this page. Deduped per
