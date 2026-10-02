@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.12] - 2026-10-02
+
+### Added
+- Signed user tokens (optional). Pass `tokenProvider` - the same function you
+  give the other Rivium SDKs - and every request carries the user's token, so
+  the server knows who the user is instead of trusting the `userId` sent by
+  the page. The token is cached in memory, renewed shortly before it expires,
+  and a request refused as expired is retried once with a fresh token.
+- `setTokenProvider()`, `setUserToken()` and the `onAuthError()` callback.
+
+Without a token provider nothing changes. The service worker file is unchanged.
+
 ## [0.1.11] - 2026-09-29
 
 ### Changed

@@ -158,6 +158,8 @@ export type OnInAppDismissedCallback = (message: InAppMessage) => void;
  */
 export interface InAppDependencies {
   serverUrl: string;
+  /** Push API transport that adds the user token. Defaults to `fetch`. */
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   getApiKey: () => string;
   getDeviceId: () => string | null;
   getUserId: () => string | null;
@@ -336,7 +338,7 @@ export class InAppMessages {
     if (filter.event) body.event = filter.event;
 
     try {
-      const response = await fetch(`${this.deps.serverUrl}/in-app/fetch`, {
+      const response = await this.send(`${this.deps.serverUrl}/in-app/fetch`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': this.deps.getApiKey() },
         body: JSON.stringify(body),
@@ -470,7 +472,7 @@ export class InAppMessages {
     if (buttonId) body.buttonId = buttonId;
 
     try {
-      const response = await fetch(`${this.deps.serverUrl}/in-app/impression`, {
+      const response = await this.send(`${this.deps.serverUrl}/in-app/impression`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-api-key': this.deps.getApiKey() },
         body: JSON.stringify(body),
@@ -484,6 +486,11 @@ export class InAppMessages {
       // Reporting is best-effort — a failed report never breaks the UI.
       this.deps.log(LOG_WARNING, 'InApp: impression failed:', (error as Error)?.message);
     }
+  }
+
+  /** Push API call, through the SDK's token-aware transport when wired. */
+  private send(url: string, init?: RequestInit): Promise<Response> {
+    return this.deps.fetch ? this.deps.fetch(url, init) : fetch(url, init);
   }
 
   // --------------------------------------------------------------------------

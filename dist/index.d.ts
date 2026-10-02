@@ -16,8 +16,10 @@
  */
 import { SDK_NAME, SDK_VERSION } from './version';
 import { RiviumInbox } from './inbox';
+import { type OnAuthErrorCallback, type TokenProvider } from './user-token';
 import { InAppMessages, type InAppConfig } from './in-app';
 export { SDK_NAME, SDK_VERSION };
+export type { AuthErrorEvent, OnAuthErrorCallback, TokenProvider } from './user-token';
 export { RiviumInbox } from './inbox';
 export type { InboxContent, InboxFilter, InboxMessage, InboxMessagesResponse, InboxMessageStatus, OnInboxMessageCallback, OnInboxStatusChangeCallback, OnInboxUnreadCountCallback, } from './inbox';
 export { InAppMessages, isInAppMessageEligible, selectInAppMessages, localizedContent } from './in-app';
@@ -224,6 +226,20 @@ export interface RiviumPushConfig {
      * `inApp.triggerEvent()`.
      */
     inApp?: InAppConfig;
+    /**
+     * Optional. Returns the Rivium user token for the signed-in user, issued by
+     * **your server** (never put the server secret in the page), or null when
+     * nobody is signed in. It is the same token, and can be the same function,
+     * you give the other Rivium SDKs.
+     *
+     * With it every request proves who the user is, so nobody holding the
+     * public API key can act as another user. The SDK calls it when it needs a
+     * token, shortly before the token expires, and when the server reports an
+     * expired token. A failing provider never blocks registration or delivery.
+     *
+     * Without it the SDK behaves exactly as before.
+     */
+    tokenProvider?: TokenProvider;
 }
 /**
  * Notification action button
@@ -401,6 +417,9 @@ declare class RiviumPush {
     private onReconnectingCallback;
     private onNetworkStateCallback;
     private onAppStateCallback;
+    private onAuthErrorCallback;
+    private readonly userTokens;
+    private readonly api;
     private registerRequested;
     private ackedMessageIds;
     private receivedMessageIds;
@@ -456,6 +475,28 @@ declare class RiviumPush {
      */
     isAnalyticsEnabled(): boolean;
     private emitError;
+    /**
+     * Every Push API call goes through here, so the user token and its expiry
+     * are handled once. Without a token provider or token it is plain `fetch`.
+     */
+    private authedFetch;
+    private emitAuthError;
+    /**
+     * Drop a cached token that belongs to someone other than `userId`, so the
+     * next request asks the provider for this user's token.
+     */
+    private dropTokenOfOtherUser;
+    /**
+     * Set, replace or remove (null) the token provider after init. See
+     * `RiviumPushConfig.tokenProvider`.
+     */
+    setTokenProvider(provider: TokenProvider | null): void;
+    /**
+     * Hand the SDK a user token you fetched yourself (null forgets it). Kept in
+     * memory only. With a token provider set, the provider takes over when this
+     * token is about to expire; without one, set a new token before it expires.
+     */
+    setUserToken(token: string | null): void;
     /**
      * Register device for push notifications
      */
@@ -579,6 +620,13 @@ declare class RiviumPush {
      * Set callback for detailed errors with error codes
      */
     onDetailedError(callback: OnDetailedErrorCallback): () => void;
+    /**
+     * Set callback for user token problems: the server refused the token
+     * (`token_invalid`, `token_required`, `token_mismatch`, `token_expired`) or
+     * the token provider failed (`token_provider_failed`). Informational - the
+     * call that hit it reports its own error as usual.
+     */
+    onAuthError(callback: OnAuthErrorCallback): () => void;
     /**
      * Set callback for notification clicks
      */

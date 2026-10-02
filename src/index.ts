@@ -34,6 +34,13 @@ import {
   RegistrationFingerprint,
 } from './internal';
 import { RiviumInbox } from './inbox';
+import {
+  PushApiClient,
+  UserTokenManager,
+  type AuthErrorEvent,
+  type OnAuthErrorCallback,
+  type TokenProvider,
+} from './user-token';
 import { InAppMessages, type InAppConfig } from './in-app';
 import {
   DEFAULT_MQTT_PATH,
@@ -49,6 +56,7 @@ import {
 } from './connection';
 
 export { SDK_NAME, SDK_VERSION };
+export type { AuthErrorEvent, OnAuthErrorCallback, TokenProvider } from './user-token';
 export { RiviumInbox } from './inbox';
 export type {
   InboxContent,
@@ -368,6 +376,20 @@ export interface RiviumPushConfig {
    * `inApp.triggerEvent()`.
    */
   inApp?: InAppConfig;
+  /**
+   * Optional. Returns the Rivium user token for the signed-in user, issued by
+   * **your server** (never put the server secret in the page), or null when
+   * nobody is signed in. It is the same token, and can be the same function,
+   * you give the other Rivium SDKs.
+   *
+   * With it every request proves who the user is, so nobody holding the
+   * public API key can act as another user. The SDK calls it when it needs a
+   * token, shortly before the token expires, and when the server reports an
+   * expired token. A failing provider never blocks registration or delivery.
+   *
+   * Without it the SDK behaves exactly as before.
+   */
+  tokenProvider?: TokenProvider;
 }
 
 /**
@@ -609,6 +631,11 @@ class RiviumPush {
   private onReconnectingCallback: OnReconnectingCallback | null = null;
   private onNetworkStateCallback: OnNetworkStateCallback | null = null;
   private onAppStateCallback: OnAppStateCallback | null = null;
+  private onAuthErrorCallback: OnAuthErrorCallback | null = null;
+
+  // Signed user token (memory only) and the single door to the Push API
+  private readonly userTokens: UserTokenManager;
+  private readonly api: PushApiClient;
 
   // Set once the app calls register() so the background refresh stands down
   private registerRequested = false;
@@ -648,8 +675,12 @@ class RiviumPush {
     this.maxReconnectAttempts = this.config.maxReconnectAttempts!;
     this.logLevel = this.config.logLevel!;
 
+    this.userTokens = new UserTokenManager(this.config.tokenProvider ?? null);
+    this.api = new PushApiClient(this.userTokens, (event) => this.emitAuthError(event));
+
     this.inbox = new RiviumInbox({
       serverUrl: RIVIUM_PUSH_SERVER_URL,
+      fetch: (url, init) => this.authedFetch(url, init),
       getApiKey: () => this.config.apiKey,
       getDeviceId: () => this.deviceId,
       getUserId: () => this.userId,
@@ -667,6 +698,7 @@ class RiviumPush {
 
     this.inApp = new InAppMessages({
       serverUrl: RIVIUM_PUSH_SERVER_URL,
+      fetch: (url, init) => this.authedFetch(url, init),
       getApiKey: () => this.config.apiKey,
       getDeviceId: () => this.deviceId,
       getUserId: () => this.userId,
@@ -735,7 +767,7 @@ class RiviumPush {
     try {
       this.log(RiviumPushLogLevel.DEBUG, 'Fetching config from server...');
 
-      const response = await fetch(`${RIVIUM_PUSH_SERVER_URL}/devices/config`, {
+      const response = await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/devices/config`, {
         method: 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -880,9 +912,61 @@ class RiviumPush {
     });
   }
 
+  /**
+   * Every Push API call goes through here, so the user token and its expiry
+   * are handled once. Without a token provider or token it is plain `fetch`.
+   */
+  private authedFetch(url: string, init?: RequestInit): Promise<Response> {
+    return this.api.fetch(url, init);
+  }
+
+  private emitAuthError(event: AuthErrorEvent): void {
+    this.log(RiviumPushLogLevel.WARNING, `Auth error [${event.code}]: ${event.message}`);
+    if (this.onAuthErrorCallback) {
+      try {
+        this.onAuthErrorCallback(event);
+      } catch (error) {
+        this.log(RiviumPushLogLevel.ERROR, 'onAuthError callback threw:', error);
+      }
+    }
+  }
+
+  /**
+   * Drop a cached token that belongs to someone other than `userId`, so the
+   * next request asks the provider for this user's token.
+   */
+  private dropTokenOfOtherUser(userId?: string | null): void {
+    if (!userId || !this.userTokens.hasToken()) return;
+    const sub = this.userTokens.subject();
+    if (sub === userId) return;
+    // A token whose user cannot be read is only dropped when a provider can
+    // supply a new one.
+    if (sub === undefined && !this.userTokens.hasProvider()) return;
+    this.userTokens.clear();
+  }
+
   // ==========================================================================
   // Public API
   // ==========================================================================
+
+  /**
+   * Set, replace or remove (null) the token provider after init. See
+   * `RiviumPushConfig.tokenProvider`.
+   */
+  setTokenProvider(provider: TokenProvider | null): void {
+    this.userTokens.setProvider(provider);
+    this.log(RiviumPushLogLevel.DEBUG, provider ? 'Token provider set' : 'Token provider removed');
+  }
+
+  /**
+   * Hand the SDK a user token you fetched yourself (null forgets it). Kept in
+   * memory only. With a token provider set, the provider takes over when this
+   * token is about to expire; without one, set a new token before it expires.
+   */
+  setUserToken(token: string | null): void {
+    this.userTokens.setToken(token);
+    this.log(RiviumPushLogLevel.DEBUG, token ? `User token set (${token.length} chars)` : 'User token cleared');
+  }
 
   /**
    * Register device for push notifications
@@ -939,6 +1023,7 @@ class RiviumPush {
         ...options,
         userId: options?.userId ?? this.userId ?? undefined,
       };
+      this.dropTokenOfOtherUser(effectiveOptions.userId);
       const response = await this.registerDevice(effectiveOptions);
       this.deviceId = response.deviceId;
 
@@ -1012,7 +1097,7 @@ class RiviumPush {
     // Register topic subscription on server (for Web Push delivery via sendToTopic)
     if (this.deviceId) {
       try {
-        await fetch(`${RIVIUM_PUSH_SERVER_URL}/topics/subscribe`, {
+        await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/topics/subscribe`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1045,7 +1130,7 @@ class RiviumPush {
     // Unregister topic on server
     if (this.deviceId) {
       try {
-        await fetch(`${RIVIUM_PUSH_SERVER_URL}/topics/unsubscribe`, {
+        await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/topics/unsubscribe`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -1120,6 +1205,7 @@ class RiviumPush {
     this.inbox.onIdentityChanged();
     this.inApp.onIdentityChanged();
 
+    this.dropTokenOfOtherUser(userId);
     await this.registerDevice({ userId });
     this.log(RiviumPushLogLevel.INFO, 'User ID set:', userId);
   }
@@ -1139,7 +1225,7 @@ class RiviumPush {
 
     if (this.deviceId) {
       try {
-        await fetch(
+        await this.authedFetch(
           `${RIVIUM_PUSH_SERVER_URL}/devices/${encodeURIComponent(this.deviceId)}/user`,
           {
             method: 'DELETE',
@@ -1150,6 +1236,8 @@ class RiviumPush {
         this.log(RiviumPushLogLevel.WARNING, 'Failed to clear user ID on server:', err);
       }
     }
+    // The request above carried the signed-out user's token; forget it now.
+    this.userTokens.clear();
     this.log(RiviumPushLogLevel.INFO, 'User ID cleared');
   }
 
@@ -1212,7 +1300,7 @@ class RiviumPush {
     }
 
     try {
-      const response = await fetch(`${RIVIUM_PUSH_SERVER_URL}/devices/${this.deviceId}/mqtt-token/refresh`, {
+      const response = await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/devices/${this.deviceId}/mqtt-token/refresh`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -1336,6 +1424,19 @@ class RiviumPush {
     this.onDetailedErrorCallback = callback;
     return () => {
       this.onDetailedErrorCallback = null;
+    };
+  }
+
+  /**
+   * Set callback for user token problems: the server refused the token
+   * (`token_invalid`, `token_required`, `token_mismatch`, `token_expired`) or
+   * the token provider failed (`token_provider_failed`). Informational - the
+   * call that hit it reports its own error as usual.
+   */
+  onAuthError(callback: OnAuthErrorCallback): () => void {
+    this.onAuthErrorCallback = callback;
+    return () => {
+      this.onAuthErrorCallback = null;
     };
   }
 
@@ -1741,7 +1842,7 @@ class RiviumPush {
         this.log(RiviumPushLogLevel.DEBUG, 'Sending Web Push subscription to server');
       }
 
-      const response = await fetch(`${RIVIUM_PUSH_SERVER_URL}/devices/register`, {
+      const response = await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/devices/register`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -2258,7 +2359,7 @@ class RiviumPush {
     for (let attempt = 0; ; attempt++) {
       let retryable = true;
       try {
-        const response = await fetch(`${RIVIUM_PUSH_SERVER_URL}/receipts/delivered`, {
+        const response = await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/receipts/delivered`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',

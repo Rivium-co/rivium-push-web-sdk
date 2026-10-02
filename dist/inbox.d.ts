@@ -84,6 +84,8 @@ export type OnInboxUnreadCountCallback = (count: number) => void;
  */
 export interface InboxDependencies {
     serverUrl: string;
+    /** Push API transport that adds the user token. Defaults to `fetch`. */
+    fetch?: (url: string, init?: RequestInit) => Promise<Response>;
     getApiKey: () => string;
     getDeviceId: () => string | null;
     getUserId: () => string | null;
@@ -172,6 +174,8 @@ export declare class RiviumInbox {
     /** Messages are addressed by user when one is known, by device otherwise. */
     private identity;
     private request;
+    /** Push API call, through the SDK's token-aware transport when wired. */
+    private send;
     private setUnreadCount;
     private storageKey;
     /** Restores the persisted cache the first time it is needed per device. */

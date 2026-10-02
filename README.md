@@ -208,6 +208,33 @@ riviumPush.clearUserId();
 await riviumPush.register({ userId: 'user_123' });
 ```
 
+### Signed user tokens
+
+Optional. By default the server trusts the `userId` the page sends. With a
+token provider, every request carries a short-lived Rivium user token issued
+by your server, so the user is proven rather than claimed. It is the same
+token, and can be the same function, you pass to Rivium Chat and Rivium Sync.
+
+```typescript
+// Your server mints the token for the signed-in user; return null when signed out.
+const tokenProvider = async () => {
+  const res = await fetch('/api/rivium-token', { credentials: 'include' });
+  return res.ok ? (await res.json()).token : null;
+};
+
+const riviumPush = new RiviumPush({ apiKey: 'rv_live_your_api_key', tokenProvider });
+
+riviumPush.onAuthError((event) => {
+  // token_invalid | token_required | token_mismatch | token_expired | token_provider_failed
+  console.warn('Rivium auth error:', event.code, event.message);
+});
+```
+
+The SDK caches the token in memory, renews it shortly before it expires and
+retries once when the server reports it expired. A failing provider never
+blocks registration or delivery. You can also call `setTokenProvider(fn)`
+later, or `setUserToken(token)` if you fetch the token yourself.
+
 ## Badge Management
 
 ```typescript

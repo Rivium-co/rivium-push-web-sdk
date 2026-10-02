@@ -135,6 +135,8 @@ export type OnInAppDismissedCallback = (message: InAppMessage) => void;
  */
 export interface InAppDependencies {
     serverUrl: string;
+    /** Push API transport that adds the user token. Defaults to `fetch`. */
+    fetch?: (url: string, init?: RequestInit) => Promise<Response>;
     getApiKey: () => string;
     getDeviceId: () => string | null;
     getUserId: () => string | null;
@@ -237,6 +239,8 @@ export declare class InAppMessages {
      * when you render messages with `display: 'manual'`. Never throws.
      */
     recordImpression(messageId: string, action: InAppImpressionAction, buttonId?: string): Promise<void>;
+    /** Push API call, through the SDK's token-aware transport when wired. */
+    private send;
     /** Drop cached messages, impression counts and the session count. */
     clearCache(): void;
     /**

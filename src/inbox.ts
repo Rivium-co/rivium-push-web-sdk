@@ -97,6 +97,8 @@ export type OnInboxUnreadCountCallback = (count: number) => void;
  */
 export interface InboxDependencies {
   serverUrl: string;
+  /** Push API transport that adds the user token. Defaults to `fetch`. */
+  fetch?: (url: string, init?: RequestInit) => Promise<Response>;
   getApiKey: () => string;
   getDeviceId: () => string | null;
   getUserId: () => string | null;
@@ -442,7 +444,7 @@ export class RiviumInbox {
 
     let response: Response;
     try {
-      response = await fetch(`${this.deps.serverUrl}${path}`, {
+      response = await this.send(`${this.deps.serverUrl}${path}`, {
         method,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
@@ -463,6 +465,11 @@ export class RiviumInbox {
       // Endpoints like DELETE answer with an empty body.
       return null;
     }
+  }
+
+  /** Push API call, through the SDK's token-aware transport when wired. */
+  private send(url: string, init?: RequestInit): Promise<Response> {
+    return this.deps.fetch ? this.deps.fetch(url, init) : fetch(url, init);
   }
 
   private setUnreadCount(count: number): void {
