@@ -423,6 +423,7 @@ declare class RiviumPush {
     private registerRequested;
     private ackedMessageIds;
     private receivedMessageIds;
+    private reportedInteractions;
     /**
      * Message Inbox. Listeners can be attached immediately; network calls need
      * a registered device.
@@ -724,6 +725,13 @@ declare class RiviumPush {
      * times on network errors, 429 and 5xx. Never throws.
      */
     private reportDelivered;
+    /**
+     * POST /receipts/opened | clicked | dismissed for a notification this page
+     * showed itself (no service worker; with one, the worker reports). Same
+     * headers, dedupe and bounded retry as the delivery ack. Never throws and
+     * never delays the click handling.
+     */
+    private reportInteraction;
     private saveRegistrationState;
     /**
      * Silently re-register a browser that registered before, when the server's

@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.13] - 2026-10-28
+
+### Added
+- Opened, clicked and dismissed tracking: the service worker reports a click on a notification as `opened`, a click on an action button as `clicked` (with the action's id), and closing it without a click as `dismissed`. Sent next to opening the page, once per message. Copy the new `service-worker.js` into your public directory to get it. Notifications the SDK shows without a service worker report `opened` from the page.
+
+### Fixed
+- `unregister()` now also detaches the signed-in user from this browser on the server (as on iOS), so pushes to that user no longer target it. `getUserId()` returns `null` afterwards.
+
+### Docs
+- Browser support: Safari on iOS / iPadOS 16.4+ supports Web Push for web apps added to the Home Screen.
+
 ## [0.1.12] - 2026-10-02
 
 ### Added

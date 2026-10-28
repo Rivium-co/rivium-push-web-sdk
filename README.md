@@ -388,12 +388,17 @@ Notifications are confirmed as `delivered` automatically: Web Push arrivals by
 the service worker, and messages received over the real-time connection on an
 open page by the SDK. No code needed.
 
+The service worker also reports when a notification is `opened` (body clicked),
+`clicked` (an action button clicked) or dismissed. Copy the latest
+`service-worker.js` into your public directory to get these.
+
 ## Browser Support
 
 - Chrome 50+ (Desktop & Android)
 - Firefox 44+
 - Edge 17+
-- Safari 16+ (macOS only, iOS does not support Web Push)
+- Safari 16+ on macOS
+- Safari on iOS / iPadOS 16.4+, for web apps added to the Home Screen (not in a regular browser tab)
 - Opera 37+
 
 ## Requirements

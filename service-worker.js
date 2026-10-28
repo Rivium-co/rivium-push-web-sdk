@@ -155,6 +155,71 @@ function riviumReportDelivered(messageId) {
   });
 }
 
+/** "<kind>:<messageId>" already reported while this worker is alive. */
+const riviumReportedInteractions = new Set();
+const RIVIUM_INTERACTION_RETRY_DELAYS_MS = [1000, 3000];
+
+/**
+ * Report what the user did with a notification: `opened` (body clicked),
+ * `clicked` (an action button, with its id) or `dismissed` (closed without a
+ * click). Same headers as the delivery ack. Sent once per message and kind,
+ * retried briefly on network errors, 429 and 5xx. Never rejects, and is run
+ * next to opening the window, never before it.
+ */
+function riviumReportInteraction(kind, messageId, actionId) {
+  if (!messageId) return Promise.resolve();
+  const key = kind + ':' + messageId;
+  if (riviumReportedInteractions.has(key)) return Promise.resolve();
+  riviumReportedInteractions.add(key);
+  if (riviumReportedInteractions.size > 500) {
+    riviumReportedInteractions.delete(riviumReportedInteractions.values().next().value);
+  }
+
+  return riviumConfig()
+    .then((config) => {
+      if (!config.apiKey || !config.deviceId) {
+        riviumReportedInteractions.delete(key);
+        console.warn('[RiviumPush SW] ' + kind + ' receipt skipped - no SDK config in the worker URL or in storage');
+        return;
+      }
+      const body = { messageId, deviceId: config.deviceId };
+      if (kind === 'clicked' && actionId) body.actionId = actionId;
+
+      const attempt = (n) =>
+        fetch(`${config.serverUrl}/receipts/${kind}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': config.apiKey,
+          },
+          body: JSON.stringify(body),
+        })
+          .then((res) => {
+            if (res.ok) return true;
+            const retryable = res.status === 429 || res.status >= 500;
+            console.warn('[RiviumPush SW] ' + kind + ' receipt rejected', res.status);
+            return retryable ? null : false;
+          })
+          .catch((err) => {
+            console.warn('[RiviumPush SW] ' + kind + ' receipt failed:', err && err.message);
+            return null;
+          })
+          .then((result) => {
+            if (result !== null || n >= RIVIUM_INTERACTION_RETRY_DELAYS_MS.length) {
+              if (result !== true) riviumReportedInteractions.delete(key);
+              return;
+            }
+            return new Promise((resolve) => setTimeout(resolve, RIVIUM_INTERACTION_RETRY_DELAYS_MS[n])).then(() =>
+              attempt(n + 1),
+            );
+          });
+      return attempt(0);
+    })
+    .catch(() => {
+      riviumReportedInteractions.delete(key);
+    });
+}
+
 // Install event
 self.addEventListener('install', (event) => {
   console.log('[RiviumPush SW] Installing...');
@@ -428,7 +493,15 @@ self.addEventListener('notificationclick', (event) => {
 
   console.log('[RiviumPush SW] Target URL:', targetUrl);
 
-  event.waitUntil(
+  // Opened (body) or clicked (action button) receipt, sent next to opening
+  // the window so the click never waits for the network.
+  const receipt = riviumReportInteraction(
+    isActionClick ? 'clicked' : 'opened',
+    data.messageId || riviumPushPayload.messageId,
+    isActionClick ? action : undefined,
+  );
+
+  const openOrFocus =
     self.clients.matchAll({ type: 'window', includeUncontrolled: true })
       .then((clientList) => {
         // If we have a URL to open, just open it directly
@@ -478,8 +551,9 @@ self.addEventListener('notificationclick', (event) => {
         if (self.clients.openWindow) {
           return self.clients.openWindow('/');
         }
-      })
-  );
+      });
+
+  event.waitUntil(Promise.all([openOrFocus, receipt]));
 });
 
 // Notification close event
@@ -490,7 +564,7 @@ self.addEventListener('notificationclose', (event) => {
   const data = notification.data || {};
 
   // Send dismissal event to clients
-  self.clients.matchAll({ type: 'window', includeUncontrolled: true })
+  const notifyClients = self.clients.matchAll({ type: 'window', includeUncontrolled: true })
     .then((clientList) => {
       for (const client of clientList) {
         if (client.url.includes(self.location.origin)) {
@@ -505,7 +579,15 @@ self.addEventListener('notificationclose', (event) => {
           });
         }
       }
-    });
+    })
+    .catch(() => undefined);
+
+  // The browser fires this only when the user closes the notification
+  // without clicking it (a click closes it through notification.close()).
+  const riviumPushPayload = data.riviumPushPayload || {};
+  event.waitUntil(
+    Promise.all([notifyClients, riviumReportInteraction('dismissed', data.messageId || riviumPushPayload.messageId)]),
+  );
 });
 
 // Message from main app

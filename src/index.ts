@@ -645,6 +645,8 @@ class RiviumPush {
   // push over the real-time channel and from the service worker, and the
   // onMessage callback must fire once per message.
   private receivedMessageIds = new BoundedSet(DELIVERY_ACK_DEDUPE_LIMIT);
+  // "<kind>:<messageId>" opened / clicked receipts this page already sent
+  private reportedInteractions = new BoundedSet(DELIVERY_ACK_DEDUPE_LIMIT);
 
   /**
    * Message Inbox. Listeners can be attached immediately; network calls need
@@ -1075,6 +1077,35 @@ class RiviumPush {
       await this.pushSubscription.unsubscribe();
       this.pushSubscription = null;
     }
+
+    // Detach the user on the server too (as the iOS SDK does): otherwise the
+    // install stays linked to the user. Best effort: a failure (e.g.
+    // offline) is logged and unregister still completes.
+    if (this.userId) {
+      this.userId = null;
+      try {
+        localStorage.removeItem('rivium_push_user_id');
+      } catch {
+        // Storage blocked: nothing persisted to remove.
+      }
+      this.inbox.onIdentityChanged();
+      this.inApp.onIdentityChanged();
+      if (this.deviceId) {
+        try {
+          await this.authedFetch(
+            `${RIVIUM_PUSH_SERVER_URL}/devices/${encodeURIComponent(this.deviceId)}/user`,
+            {
+              method: 'DELETE',
+              headers: { 'x-api-key': this.config.apiKey },
+            },
+          );
+        } catch (err) {
+          this.log(RiviumPushLogLevel.WARNING, 'Failed to detach user on unregister:', err);
+        }
+      }
+    }
+    // Any request above carried the user's token; forget it now.
+    this.userTokens.clear();
 
     this.trackEvent(RiviumPushAnalyticsEvent.DEVICE_UNREGISTERED, {
       deviceId: this.deviceId,
@@ -2387,6 +2418,54 @@ class RiviumPush {
     }
   }
 
+  /**
+   * POST /receipts/opened | clicked | dismissed for a notification this page
+   * showed itself (no service worker; with one, the worker reports). Same
+   * headers, dedupe and bounded retry as the delivery ack. Never throws and
+   * never delays the click handling.
+   */
+  private async reportInteraction(
+    kind: 'opened' | 'clicked' | 'dismissed',
+    messageId?: string,
+    actionId?: string,
+  ): Promise<void> {
+    if (!messageId || !this.deviceId || typeof fetch === 'undefined') return;
+    const key = `${kind}:${messageId}`;
+    if (!this.reportedInteractions.add(key)) return;
+
+    const body: Record<string, string> = { messageId, deviceId: this.deviceId };
+    if (kind === 'clicked' && actionId) body.actionId = actionId;
+
+    for (let attempt = 0; ; attempt++) {
+      let retryable = true;
+      try {
+        const response = await this.authedFetch(`${RIVIUM_PUSH_SERVER_URL}/receipts/${kind}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-api-key': this.config.apiKey,
+          },
+          body: JSON.stringify(body),
+          keepalive: true,
+        });
+        if (response.ok) {
+          this.log(RiviumPushLogLevel.DEBUG, `Notification ${kind} reported`, messageId);
+          return;
+        }
+        retryable = response.status === 429 || response.status >= 500;
+        this.log(RiviumPushLogLevel.WARNING, `${kind} receipt rejected: HTTP ${response.status}`, messageId);
+      } catch (error) {
+        this.log(RiviumPushLogLevel.WARNING, `${kind} receipt failed:`, (error as Error)?.message);
+      }
+
+      if (!retryable || attempt >= DELIVERY_ACK_RETRY_DELAYS_MS.length) {
+        this.reportedInteractions.delete(key);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, DELIVERY_ACK_RETRY_DELAYS_MS[attempt]));
+    }
+  }
+
   // ==========================================================================
   // Private Methods - Automatic registration refresh
   // ==========================================================================
@@ -2692,6 +2771,8 @@ class RiviumPush {
       const notification = new Notification(message.title, options);
 
       notification.onclick = () => {
+        // Fire-and-forget; the click handling below does not wait for it.
+        void this.reportInteraction('opened', message.messageId);
         window.focus();
         if (message.deepLink) {
           window.location.href = message.deepLink;
