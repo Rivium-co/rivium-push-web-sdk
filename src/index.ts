@@ -2344,6 +2344,9 @@ class RiviumPush {
 
     if (!this.markReceived(message.messageId)) {
       this.log(RiviumPushLogLevel.DEBUG, 'Duplicate message ignored:', message.messageId);
+      // The first copy's ack may not have got out, and the ack is what stops the
+      // backend resending. A no-op once acked.
+      this.reportDelivered(message.messageId);
       return;
     }
 
