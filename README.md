@@ -105,6 +105,7 @@ const riviumPush = new RiviumPush({
   apiKey: 'rv_live_...',                    // Required - from Rivium Console
   serviceWorkerPath: '/rivium-push-sw.js',  // Optional - service worker path
   autoRegisterServiceWorker: true,          // Optional - auto register SW (default: true)
+  serviceWorkerScope: '/',                  // Optional - its scope; use e.g. '/rivium-push/' next to another worker at '/'
   mqttQos: 1,                              // Optional - MQTT QoS level (default: 1)
   maxReconnectAttempts: 0,                  // Optional - max reconnect attempts (default: 0 = keep trying)
   logLevel: RiviumPushLogLevel.ERROR,       // Optional - log level

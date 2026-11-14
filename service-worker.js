@@ -591,9 +591,26 @@ self.addEventListener('notificationclick', (event) => {
           }
         }
 
-        // Open new window at root if no existing window
+        // No window open: open the app with the message, which getInitialMessage() reads from the URL.
         if (self.clients.openWindow) {
-          return self.clients.openWindow('/');
+          const opened = {
+            title: notification.title,
+            body: notification.body,
+            data: data,
+            deepLink: data.deepLink,
+            messageId: data.messageId,
+            campaignId: data.campaignId,
+          };
+          // The app is the folder the worker is served from (it sits next to index.html).
+          let url = '/';
+          try {
+            const target = new URL('./', self.location.href);
+            target.searchParams.set('rivium_push_notification', JSON.stringify(opened));
+            url = target.href;
+          } catch (e) {
+            url = '/';
+          }
+          return self.clients.openWindow(url);
         }
       });
 

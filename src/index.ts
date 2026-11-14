@@ -345,6 +345,12 @@ export interface RiviumPushConfig {
   vapidPublicKey?: string;
   /** Auto-register service worker (default: true) */
   autoRegisterServiceWorker?: boolean;
+  /**
+   * Scope of the service worker registration (default: '/'). A narrower scope, such as '/rivium-push/', keeps it apart
+   * from a worker the app has at '/' (Flutter web has one): one scope holds one worker, and two at '/' replace each
+   * other. A worker receives pushes whatever pages it controls.
+   */
+  serviceWorkerScope?: string;
   /** MQTT QoS level (default: 1) */
   mqttQos?: 0 | 1 | 2;
   /**
@@ -671,6 +677,7 @@ class RiviumPush {
     }
     this.config = {
       serviceWorkerPath: '/rivium-push-sw.js',
+      serviceWorkerScope: '/',
       autoRegisterServiceWorker: true,
       autoRefresh: true,
       mqttQos: 1,
@@ -981,18 +988,8 @@ class RiviumPush {
   async register(options?: RegisterOptions): Promise<string> {
     this.registerRequested = true;
     try {
-      // Wait for config to be fetched (includes VAPID key)
-      if (!this.mqttConfigFetched) {
-        this.log(RiviumPushLogLevel.DEBUG, 'Waiting for server config...');
-        await this.waitForConfig();
-      }
-
-      // Register service worker if enabled
-      if (this.config.autoRegisterServiceWorker) {
-        await this.registerServiceWorker();
-      }
-
-      // Request notification permission
+      // Ask for permission first: Safari (iOS home screen apps) shows the prompt only shortly after the user's tap,
+      // so nothing slow (server config, service worker) may run before it.
       this.trackEvent(RiviumPushAnalyticsEvent.PERMISSION_REQUESTED);
       const permission = await this.requestNotificationPermission();
 
@@ -1009,6 +1006,17 @@ class RiviumPush {
       }
 
       this.trackEvent(RiviumPushAnalyticsEvent.PERMISSION_GRANTED);
+
+      // Wait for config to be fetched (includes VAPID key)
+      if (!this.mqttConfigFetched) {
+        this.log(RiviumPushLogLevel.DEBUG, 'Waiting for server config...');
+        await this.waitForConfig();
+      }
+
+      // Register service worker if enabled
+      if (this.config.autoRegisterServiceWorker) {
+        await this.registerServiceWorker();
+      }
 
       // Get Web Push subscription for background notifications
       // Use VAPID key from server (preferred) or from config
@@ -1628,6 +1636,22 @@ class RiviumPush {
   // Private Methods - Service Worker & Push
   // ==========================================================================
 
+  /**
+   * The registration of this SDK's worker, if the app registered it itself. Another worker (Flutter web's own at '/')
+   * is never used: subscribing it to Web Push would send pushes to a worker that does not show them.
+   */
+  private async ownServiceWorkerRegistration(): Promise<ServiceWorkerRegistration | null> {
+    try {
+      const registration = await navigator.serviceWorker.getRegistration(this.config.serviceWorkerScope || '/');
+      const script = registration?.active?.scriptURL ?? registration?.waiting?.scriptURL ?? registration?.installing?.scriptURL;
+      if (!registration || !script) return null;
+      const own = new URL(this.config.serviceWorkerPath!, self.location.origin).pathname;
+      return new URL(script).pathname === own ? registration : null;
+    } catch {
+      return null;
+    }
+  }
+
   private async registerServiceWorker(): Promise<void> {
     if (!('serviceWorker' in navigator)) {
       throw new RiviumPushError(RiviumPushErrorCode.SERVICE_NOT_RUNNING, 'Service Workers not supported');
@@ -1655,7 +1679,7 @@ class RiviumPush {
 
       this.serviceWorkerRegistration = await navigator.serviceWorker.register(
         swUrl.pathname + swUrl.search,
-        { scope: '/' }
+        { scope: this.config.serviceWorkerScope || '/' }
       );
       this.log(RiviumPushLogLevel.INFO, 'Service Worker registered');
     } catch (error) {
@@ -2516,7 +2540,7 @@ class RiviumPush {
         if (this.config.autoRegisterServiceWorker) {
           await this.registerServiceWorker();
         } else {
-          this.serviceWorkerRegistration = (await navigator.serviceWorker.getRegistration()) ?? null;
+          this.serviceWorkerRegistration = await this.ownServiceWorkerRegistration();
         }
       }
 

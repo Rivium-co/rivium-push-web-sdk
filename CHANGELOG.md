@@ -5,6 +5,23 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.16] - 2026-11-15
+
+### Added
+- `serviceWorkerScope` (default `/`): register the Rivium Push worker under its own scope, next to another service
+  worker the app has at `/` (Flutter web's own unregisters itself at `/` and would take the push subscription with
+  it). A worker receives pushes whatever pages it controls.
+
+### Changed
+- `register()` asks for notification permission first, before the server config and the service worker. Safari
+  (iPhone home-screen apps) shows the prompt only shortly after the user's tap.
+
+### Fixed
+- With `autoRegisterServiceWorker: false`, the background refresh no longer subscribes another library's worker (any
+  worker at the page's scope) to Web Push; only the Rivium Push worker is used.
+- Tapping a notification while no window of the app is open opens the app with the message, so
+  `getInitialMessage()` returns it (it opened `/` without it).
+
 ## [0.1.15] - 2026-11-15
 
 ### Added
