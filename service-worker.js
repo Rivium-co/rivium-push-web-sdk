@@ -288,7 +288,8 @@ self.addEventListener('push', (event) => {
     renotify: true,
     // A second signal to Android that this is a fresh user-visible event.
     // Ignored on desktop.
-    vibrate: [200, 100, 200],
+    // `vibrate: false` comes from a notification channel without vibration (Rivium Console).
+    vibrate: data.vibrate === false ? [] : [200, 100, 200],
     data: {
       ...data.data,
       deepLink: data.deepLink,
@@ -311,9 +312,29 @@ self.addEventListener('push', (event) => {
   }
 
   // Show notification with potentially localized title
-  const title = localizedTitle || data.title;
+  let title = localizedTitle || data.title;
+  const conversation = riviumConversationOf(data.data, title);
 
   event.waitUntil((async () => {
+    // A chat message (data.conversationId): one notification per conversation, the sender's photo, earlier lines kept.
+    if (conversation) {
+      const tag = 'rivium-conversation:' + conversation.id;
+      let previous = [];
+      try {
+        const open = await self.registration.getNotifications({ tag });
+        previous = (open[0] && open[0].data && open[0].data.riviumConversationLines) || [];
+      } catch (err) {
+        previous = [];
+      }
+      const view = riviumConversationView(conversation, options.body || '', previous);
+      title = view.title;
+      options.body = view.body;
+      options.tag = tag;
+      options.data.riviumConversationLines = view.lines;
+      if (conversation.avatarUrl) options.icon = conversation.avatarUrl;
+      delete options.image;
+    }
+
     // Mirror the payload to any visible page. On mobile the app is usually
     // backgrounded or the screen is locked, so the page-side connection is
     // asleep and only the worker sees the push. Pages should dedupe by
@@ -424,6 +445,29 @@ self.addEventListener('pushsubscriptionchange', (event) => {
       }),
   );
 });
+
+// Chat-style notifications (same rules as src/conversation.ts).
+function riviumConversationOf(data, fallbackSender) {
+  if (!data) return null;
+  const text = (v) => (v === undefined || v === null ? undefined : String(v).trim() || undefined);
+  const id = text(data.conversationId);
+  if (!id) return null;
+  const avatar = text(data.senderAvatarUrl);
+  return {
+    id: id.slice(0, 200),
+    senderName: text(data.senderName) || fallbackSender || '?',
+    avatarUrl: avatar && /^https?:\/\//i.test(avatar) ? avatar : undefined,
+    title: text(data.conversationTitle),
+    isGroup: data.conversationIsGroup === true || String(data.conversationIsGroup).toLowerCase() === 'true',
+  };
+}
+
+function riviumConversationView(c, body, previousLines) {
+  const line = c.isGroup ? c.senderName + ': ' + body : body;
+  const before = Array.isArray(previousLines) ? previousLines.filter((l) => typeof l === 'string') : [];
+  const lines = before.concat([line]).slice(-5);
+  return { title: c.isGroup && c.title ? c.title : c.senderName, body: lines.join('\n'), lines };
+}
 
 // Helper function to get localized content
 function getLocalizedContent(data, field) {

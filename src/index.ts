@@ -26,6 +26,7 @@ import {
   PNConnectionListener,
 } from '@rivium/pn-protocol';
 import { SDK_NAME, SDK_VERSION } from './version';
+import { conversationOf, conversationTag, conversationView } from './conversation';
 import {
   BoundedSet,
   detectDeviceInfo,
@@ -469,6 +470,10 @@ export interface RiviumPushMessage {
   collapseKey?: string;
   /** Category for filtering */
   category?: string;
+  /** Notification channel the message was sent on (a channel defined in Rivium Console). */
+  channelId?: string;
+  /** False when the message's channel has vibration off. */
+  vibrate?: boolean;
   // Priority and TTL
   /** Priority: default, high, low */
   priority?: 'default' | 'high' | 'low';
@@ -2570,6 +2575,8 @@ class RiviumPush {
       threadId: data.threadId,
       collapseKey: data.collapseKey,
       category: data.category,
+      channelId: data.channelId,
+      vibrate: data.vibrate,
       // Priority
       priority: data.priority,
       ttl: data.ttl,
@@ -2730,6 +2737,9 @@ class RiviumPush {
     }
   }
 
+  /** Lines of the conversation notifications shown without a service worker (tag → lines). */
+  private conversationLines = new Map<string, string[]>();
+
   private showRichNotification(message: RiviumPushMessage): void {
     if (Notification.permission !== 'granted') {
       return;
@@ -2753,6 +2763,7 @@ class RiviumPush {
       },
       requireInteraction: message.priority === 'high',
       silent: message.sound === 'none',
+      ...(message.vibrate === false ? { vibrate: [] } : {}),
     };
 
     // Add action buttons if supported
@@ -2766,6 +2777,56 @@ class RiviumPush {
       if (this.serviceWorkerRegistration) {
         (options as any).actions = notificationActions;
       }
+    }
+
+    // A chat message (data.conversationId): one notification per conversation, the sender's photo, earlier lines kept.
+    const conversation = conversationOf(message.data as Record<string, unknown> | undefined, message.title);
+    if (conversation && !this.serviceWorkerRegistration) {
+      // No service worker (e.g. Flutter web): the same tag replaces the last one; earlier lines are kept here.
+      const tag = conversationTag(conversation);
+      const view = conversationView(conversation, message.body ?? '', this.conversationLines.get(tag));
+      this.conversationLines.set(tag, view.lines);
+      const notification = new Notification(view.title, {
+        ...options,
+        body: view.body,
+        tag,
+        icon: conversation.avatarUrl ?? options.icon,
+        image: undefined,
+      } as NotificationOptions);
+      notification.onclick = () => {
+        this.conversationLines.delete(tag);
+        void this.reportInteraction('opened', message.messageId);
+        window.focus();
+        if (message.deepLink) window.location.href = message.deepLink;
+        if (this.onNotificationClickCallback) this.onNotificationClickCallback(message);
+        this.trackEvent(RiviumPushAnalyticsEvent.NOTIFICATION_CLICKED, { messageId: message.messageId, title: message.title });
+        notification.close();
+      };
+      notification.onclose = () => this.conversationLines.delete(tag);
+      return;
+    }
+    if (conversation && this.serviceWorkerRegistration) {
+      const registration = this.serviceWorkerRegistration;
+      const tag = conversationTag(conversation);
+      void (async () => {
+        let previous: unknown = [];
+        try {
+          const open = await registration.getNotifications({ tag });
+          previous = open[0]?.data?.riviumConversationLines ?? [];
+        } catch {
+          previous = [];
+        }
+        const view = conversationView(conversation, message.body ?? '', previous);
+        await registration.showNotification(view.title, {
+          ...options,
+          body: view.body,
+          tag,
+          icon: conversation.avatarUrl ?? options.icon,
+          image: undefined,
+          data: { ...options.data, riviumConversationLines: view.lines },
+        } as NotificationOptions);
+      })();
+      return;
     }
 
     if (this.serviceWorkerRegistration) {

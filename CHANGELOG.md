@@ -5,6 +5,20 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.15] - 2026-11-15
+
+### Added
+- Chat-style notifications. A message whose `data` has a `conversationId` keeps one notification per conversation
+  (the earlier lines stay, up to 5), shows the sender's photo (`senderAvatarUrl`) as the icon, and for a group the
+  group's name with "sender: text" lines. Works in the service worker and on the page (also without a service
+  worker). Keys: `conversationId` (required), `senderName`, `senderId`, `senderAvatarUrl`, `conversationTitle`, `conversationIsGroup`.
+
+## [0.1.14] - 2026-11-06
+
+### Added
+- Notification channels: a message on a channel without sound and without vibration is shown silently and without
+  vibration. `channelId` on the message.
+
 ## [0.1.13] - 2026-10-28
 
 ### Added

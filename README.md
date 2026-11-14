@@ -392,6 +392,23 @@ The service worker also reports when a notification is `opened` (body clicked),
 `clicked` (an action button clicked) or dismissed. Copy the latest
 `service-worker.js` into your public directory to get these.
 
+## Conversation Notifications
+
+A message whose `data` has a `conversationId` keeps one notification per conversation: the earlier lines stay (up to
+5), the sender's photo is the icon, and a group shows its name with "sender: text" lines. Works in the service worker
+and on the page. Messages without `conversationId` look as before.
+
+| Key | |
+|---|---|
+| `conversationId` | Required. One conversation per id (your chat or room id). |
+| `senderName` | Who wrote the message (else the title). |
+| `senderId` | Tells two senders with the same name apart. |
+| `senderAvatarUrl` | An https image for the sender's photo. |
+| `conversationTitle` | The group's name (shown for groups). |
+| `conversationIsGroup` | `true` for a group. |
+
+Guide: https://rivium.co/docs/push/conversation-notifications
+
 ## Browser Support
 
 - Chrome 50+ (Desktop & Android)

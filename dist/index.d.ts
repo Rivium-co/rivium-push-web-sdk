@@ -301,6 +301,10 @@ export interface RiviumPushMessage {
     collapseKey?: string;
     /** Category for filtering */
     category?: string;
+    /** Notification channel the message was sent on (a channel defined in Rivium Console). */
+    channelId?: string;
+    /** False when the message's channel has vibration off. */
+    vibrate?: boolean;
     /** Priority: default, high, low */
     priority?: 'default' | 'high' | 'low';
     /** Time to live in seconds */
@@ -754,6 +758,8 @@ declare class RiviumPush {
      */
     private routeInboxUpdate;
     private handleServiceWorkerMessage;
+    /** Lines of the conversation notifications shown without a service worker (tag → lines). */
+    private conversationLines;
     private showRichNotification;
     private updateFaviconBadge;
     private setConnectionState;
