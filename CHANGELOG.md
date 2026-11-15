@@ -5,7 +5,49 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.20] - 2026-11-15
+
+### Added
+- `prepareWebPush()` unregisters the same worker under another scope (an older setup of the app, such as
+  `/rivium-push/` before the worker moved to `/`), so a phone keeps one subscription.
+
+## [0.1.19] - 2026-11-15
+
+### Added
+- When Web Push is refused, the registration also reports what the browser said around it
+  (`metadata.webPushContext`: notification permission, the push manager's permission state, whether the user's tap
+  was still active, whether a worker controls the page, the worker's scope and state), and `metadata.webPush` names
+  the attempt that failed (`first` or `after permission`).
+
+## [0.1.18] - 2026-11-15
+
+### Added
+- `prepareWebPush()`: registers the service worker when the page loads and waits until it is active (no permission
+  needed). `getWebPushStatus()`: how Web Push went at the last `register()`.
+
+### Fixed
+- Safari (iPhone home-screen apps) refused the Web Push subscription (`NotAllowedError: User denied push
+  permission`) although notifications were allowed: it accepts one only right after the user's tap, and `register()`
+  first waited for the server config and the worker. With a prepared worker, `register()` now subscribes first;
+  when permission is not decided yet, the subscription itself shows the prompt.
+
+## [0.1.17] - 2026-11-15
+
+**Withdrawn from Rivium Center:** Web Push on iPhone home-screen apps did not work in this version. Use 0.1.18.
+
+### Fixed
+- Web Push subscribes only once the service worker is active. Right after it is registered the worker is often still
+  installing; Safari (iPhone home-screen apps) then refused the subscription and the app silently fell back to the
+  live connection, which works only while the app is open.
+
+### Added
+- The registration reports how Web Push went (`metadata.webPush`: `subscribed`, `off`, `no-worker`,
+  `no-push-manager`, `no-vapid-key` or `failed: …`) and whether the app runs installed (`metadata.displayMode`:
+  `standalone` or `browser`), so a device without background notifications can be explained.
+
 ## [0.1.16] - 2026-11-15
+
+**Withdrawn from Rivium Center:** Web Push on iPhone home-screen apps did not work in this version. Use 0.1.18.
 
 ### Added
 - `serviceWorkerScope` (default `/`): register the Rivium Push worker under its own scope, next to another service

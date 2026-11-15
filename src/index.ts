@@ -598,6 +598,14 @@ class RiviumPush {
   private pnSocket: PNSocket | null = null;
   private serviceWorkerRegistration: ServiceWorkerRegistration | null = null;
   private pushSubscription: PushSubscription | null = null;
+  /**
+   * How the last Web Push attempt went, sent with the registration (`metadata.webPush`) so a missing subscription can
+   * be explained from the server: `subscribed`, `off`, `no-worker`, `no-push-manager`, `no-vapid-key` or
+   * `failed: <error name>: <message>`.
+   */
+  private webPushStatus: string | null = null;
+  /** metadata.webPushContext: what the browser reported around a failed attempt. */
+  private webPushContextText: string | null = null;
   private connectionState: ConnectionState = 'disconnected';
   private maxReconnectAttempts = 0;
   // Real-time connection lifecycle (set while the SDK keeps a connection up)
@@ -987,7 +995,31 @@ class RiviumPush {
    */
   async register(options?: RegisterOptions): Promise<string> {
     this.registerRequested = true;
+    this.webPushContextText = null;
     try {
+      // Safari (iPhone home-screen apps) allows a Web Push subscription only right after the user's tap. With the
+      // worker already prepared (prepareWebPush) and the key known, subscribe first: nothing slow runs before it, and
+      // when permission is not decided yet the subscription itself shows the prompt.
+      const earlyKey = this.vapidPublicKey || this.config.vapidPublicKey;
+      if (
+        earlyKey &&
+        this.serviceWorkerRegistration?.active &&
+        typeof Notification !== 'undefined' &&
+        Notification.permission !== 'denied' &&
+        typeof window !== 'undefined' &&
+        'PushManager' in window
+      ) {
+        const before = await this.webPushContext();
+        try {
+          this.pushSubscription = await this.subscribeToPush(earlyKey);
+          this.webPushStatus = 'subscribed';
+        } catch (e) {
+          this.webPushStatus = this.webPushFailure(e, 'first');
+          this.webPushContextText = `before: ${before} | after: ${await this.webPushContext()}`;
+          this.log(RiviumPushLogLevel.WARNING, 'Web Push subscription failed:', e);
+        }
+      }
+
       // Ask for permission first: Safari (iOS home screen apps) shows the prompt only shortly after the user's tap,
       // so nothing slow (server config, service worker) may run before it.
       this.trackEvent(RiviumPushAnalyticsEvent.PERMISSION_REQUESTED);
@@ -1013,21 +1045,33 @@ class RiviumPush {
         await this.waitForConfig();
       }
 
-      // Register service worker if enabled
-      if (this.config.autoRegisterServiceWorker) {
-        await this.registerServiceWorker();
+      // Register service worker if enabled (prepareWebPush may have done it already)
+      if (this.config.autoRegisterServiceWorker && !this.serviceWorkerRegistration?.active) {
+        try {
+          await this.registerServiceWorker();
+        } catch (e) {
+          this.webPushStatus = `failed: worker: ${(e as Error)?.message ?? e}`.slice(0, 200);
+          throw e;
+        }
       }
 
       // Get Web Push subscription for background notifications
       // Use VAPID key from server (preferred) or from config
       const vapidKey = this.vapidPublicKey || this.config.vapidPublicKey;
-      if (vapidKey && this.serviceWorkerRegistration) {
+      if (this.webPushStatus === 'subscribed' && this.pushSubscription) {
+        // Subscribed at the start of this call.
+      } else if (vapidKey && this.serviceWorkerRegistration) {
         try {
           this.pushSubscription = await this.subscribeToPush(vapidKey);
+          this.webPushStatus = 'subscribed';
           this.log(RiviumPushLogLevel.INFO, 'Web Push subscription created for background notifications');
         } catch (e) {
+          this.webPushStatus = this.webPushFailure(e, 'after permission');
+          this.webPushContextText = `${this.webPushContextText ? `${this.webPushContextText} || ` : ''}then: ${await this.webPushContext()}`.slice(0, 500);
           this.log(RiviumPushLogLevel.WARNING, 'Web Push subscription failed (will use MQTT only):', e);
         }
+      } else {
+        this.webPushStatus = this.webPushSkipped(vapidKey);
       }
 
       // Register with backend.
@@ -1296,6 +1340,50 @@ class RiviumPush {
    * Get the message that launched/opened the app (when user tapped a notification)
    * Returns null if the app was not opened from a notification tap
    */
+  /**
+   * Registers the service worker now and waits until it is active (needs no permission). Call it when the page
+   * loads: a later register() from a tap then subscribes at once, which Safari (iPhone home-screen apps) requires.
+   * Does nothing with autoRegisterServiceWorker: false. Never throws.
+   */
+  async prepareWebPush(): Promise<void> {
+    try {
+      if (!this.config.autoRegisterServiceWorker || typeof navigator === 'undefined' || !('serviceWorker' in navigator)) return;
+      if (!this.mqttConfigFetched) await this.waitForConfig().catch(() => undefined);
+      if (!this.serviceWorkerRegistration) await this.registerServiceWorker();
+      if (this.serviceWorkerRegistration) await this.waitForActiveWorker(this.serviceWorkerRegistration);
+      await this.removeOtherScopes();
+    } catch (e) {
+      this.log(RiviumPushLogLevel.WARNING, 'Web Push preparation failed:', e);
+    }
+  }
+
+  /**
+   * The same worker registered under another scope (an older setup of this app, such as '/rivium-push/' before the
+   * worker moved to '/') is unregistered, so the phone keeps one subscription. Never throws.
+   */
+  private async removeOtherScopes(): Promise<void> {
+    try {
+      const own = new URL(this.config.serviceWorkerPath!, self.location.origin).pathname;
+      const keep = this.serviceWorkerRegistration?.scope;
+      const all = await navigator.serviceWorker.getRegistrations();
+      for (const registration of all) {
+        const script = registration.active?.scriptURL ?? registration.waiting?.scriptURL ?? registration.installing?.scriptURL;
+        if (!script || registration.scope === keep) continue;
+        if (new URL(script).pathname === own) await registration.unregister();
+      }
+    } catch {
+      // best effort
+    }
+  }
+
+  /**
+   * How Web Push went at the last register(): `subscribed`, `off`, `no-worker`, `no-push-manager`, `no-vapid-key`,
+   * `failed: <error>` (Safari: `failed: NotAllowedError: …` = call register() again from a tap), or null before it.
+   */
+  getWebPushStatus(): string | null {
+    return this.webPushStatus;
+  }
+
   getInitialMessage(): RiviumPushMessage | null {
     return this.initialMessage;
   }
@@ -1740,6 +1828,75 @@ class RiviumPush {
     });
   }
 
+  /** Resolves once the registration has an active worker (at most [timeoutMs]; subscribe() then reports the error). */
+  private waitForActiveWorker(registration: ServiceWorkerRegistration, timeoutMs = 10000): Promise<void> {
+    if (registration.active) return Promise.resolve();
+    const worker = registration.installing ?? registration.waiting;
+    if (!worker) return Promise.resolve();
+    return new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        worker.removeEventListener('statechange', onChange);
+        resolve();
+      };
+      const onChange = () => {
+        if (worker.state === 'activated' || worker.state === 'redundant') done();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      worker.addEventListener('statechange', onChange);
+    });
+  }
+
+  private webPushFailure(e: unknown, step = ''): string {
+    const err = e as { name?: string; message?: string } | null;
+    return `failed${step ? ` (${step})` : ''}: ${err?.name ?? 'Error'}: ${err?.message ?? String(e)}`.slice(0, 200);
+  }
+
+  /**
+   * What the browser said when Web Push was attempted (sent as `metadata.webPushContext`): notification permission,
+   * the push manager's own permission state, whether the user's tap was still active, whether a worker controls the
+   * page and the worker's scope. Explains a refusal such as Safari's "User denied push permission". Never throws.
+   */
+  private async webPushContext(): Promise<string> {
+    const parts: string[] = [];
+    try {
+      parts.push(`notification=${typeof Notification !== 'undefined' ? Notification.permission : 'none'}`);
+      const reg = this.serviceWorkerRegistration;
+      if (reg?.pushManager?.permissionState) {
+        try {
+          parts.push(`push=${await reg.pushManager.permissionState({ userVisibleOnly: true })}`);
+        } catch (e) {
+          parts.push(`push=error:${(e as Error)?.name ?? e}`);
+        }
+      }
+      const activation = (navigator as Navigator & { userActivation?: { isActive: boolean; hasBeenActive: boolean } }).userActivation;
+      if (activation) parts.push(`tap=${activation.isActive ? 'active' : activation.hasBeenActive ? 'used' : 'none'}`);
+      parts.push(`controlled=${typeof navigator !== 'undefined' && navigator.serviceWorker?.controller ? 'yes' : 'no'}`);
+      if (reg) parts.push(`scope=${new URL(reg.scope).pathname}`, `worker=${reg.active ? 'active' : reg.installing ? 'installing' : reg.waiting ? 'waiting' : 'none'}`);
+    } catch {
+      // best effort
+    }
+    return parts.join(' ').slice(0, 300);
+  }
+
+  /** Why no subscription was attempted. */
+  private webPushSkipped(vapidKey: string | null | undefined): string {
+    if (!this.config.autoRegisterServiceWorker && !this.serviceWorkerRegistration) return 'off';
+    if (typeof window !== 'undefined' && !('PushManager' in window)) return 'no-push-manager';
+    if (!this.serviceWorkerRegistration) return 'no-worker';
+    if (!vapidKey) return 'no-vapid-key';
+    return 'off';
+  }
+
+  /** `standalone` for an installed web app (home screen), else `browser`. */
+  private displayMode(): string | undefined {
+    if (typeof window === 'undefined') return undefined;
+    const standalone =
+      (typeof window.matchMedia === 'function' && window.matchMedia('(display-mode: standalone)').matches) ||
+      (navigator as Navigator & { standalone?: boolean }).standalone === true;
+    return standalone ? 'standalone' : 'browser';
+  }
+
   private async requestNotificationPermission(): Promise<NotificationPermission> {
     if (typeof Notification === 'undefined') {
       return 'denied';
@@ -1807,6 +1964,9 @@ class RiviumPush {
       }
     }
 
+    // A subscription needs an active worker. Right after register() it is often still installing: Chrome usually
+    // gets there in time, Safari (iPhone) does not and refuses the subscription.
+    await this.waitForActiveWorker(this.serviceWorkerRegistration);
     const subscription = await this.serviceWorkerRegistration.pushManager.subscribe({
       userVisibleOnly: true,
       applicationServerKey: this.urlBase64ToUint8Array(vapidPublicKey) as BufferSource,
@@ -1885,6 +2045,9 @@ class RiviumPush {
           userAgent: typeof navigator !== 'undefined' ? navigator.userAgent : undefined,
           language: typeof navigator !== 'undefined' ? navigator.language : undefined,
           url: typeof window !== 'undefined' ? window.location.origin : undefined,
+          ...(this.webPushStatus ? { webPush: this.webPushStatus } : {}),
+          ...(this.webPushContextText && this.webPushStatus !== 'subscribed' ? { webPushContext: this.webPushContextText } : {}),
+          displayMode: this.displayMode(),
         },
         ...attrs,
       };
@@ -2549,7 +2712,15 @@ class RiviumPush {
       let subscription: PushSubscription | null = null;
       const vapidKey = this.vapidPublicKey || this.config.vapidPublicKey;
       if (vapidKey && this.serviceWorkerRegistration) {
-        subscription = await this.subscribeToPush(vapidKey);
+        try {
+          subscription = await this.subscribeToPush(vapidKey);
+          this.webPushStatus = 'subscribed';
+        } catch (e) {
+          this.webPushStatus = this.webPushFailure(e);
+          throw e;
+        }
+      } else {
+        this.webPushStatus = this.webPushSkipped(vapidKey);
       }
 
       const reason = getRefreshReason(

@@ -394,6 +394,14 @@ declare class RiviumPush {
     private pnSocket;
     private serviceWorkerRegistration;
     private pushSubscription;
+    /**
+     * How the last Web Push attempt went, sent with the registration (`metadata.webPush`) so a missing subscription can
+     * be explained from the server: `subscribed`, `off`, `no-worker`, `no-push-manager`, `no-vapid-key` or
+     * `failed: <error name>: <message>`.
+     */
+    private webPushStatus;
+    /** metadata.webPushContext: what the browser reported around a failed attempt. */
+    private webPushContextText;
     private connectionState;
     private maxReconnectAttempts;
     private connectionStarted;
@@ -577,6 +585,22 @@ declare class RiviumPush {
      * Get the message that launched/opened the app (when user tapped a notification)
      * Returns null if the app was not opened from a notification tap
      */
+    /**
+     * Registers the service worker now and waits until it is active (needs no permission). Call it when the page
+     * loads: a later register() from a tap then subscribes at once, which Safari (iPhone home-screen apps) requires.
+     * Does nothing with autoRegisterServiceWorker: false. Never throws.
+     */
+    prepareWebPush(): Promise<void>;
+    /**
+     * The same worker registered under another scope (an older setup of this app, such as '/rivium-push/' before the
+     * worker moved to '/') is unregistered, so the phone keeps one subscription. Never throws.
+     */
+    private removeOtherScopes;
+    /**
+     * How Web Push went at the last register(): `subscribed`, `off`, `no-worker`, `no-push-manager`, `no-vapid-key`,
+     * `failed: <error>` (Safari: `failed: NotAllowedError: …` = call register() again from a tap), or null before it.
+     */
+    getWebPushStatus(): string | null;
     getInitialMessage(): RiviumPushMessage | null;
     /**
      * Get current badge count
@@ -679,6 +703,19 @@ declare class RiviumPush {
      * back to its URL exactly as before.
      */
     private storeServiceWorkerConfig;
+    /** Resolves once the registration has an active worker (at most [timeoutMs]; subscribe() then reports the error). */
+    private waitForActiveWorker;
+    private webPushFailure;
+    /**
+     * What the browser said when Web Push was attempted (sent as `metadata.webPushContext`): notification permission,
+     * the push manager's own permission state, whether the user's tap was still active, whether a worker controls the
+     * page and the worker's scope. Explains a refusal such as Safari's "User denied push permission". Never throws.
+     */
+    private webPushContext;
+    /** Why no subscription was attempted. */
+    private webPushSkipped;
+    /** `standalone` for an installed web app (home screen), else `browser`. */
+    private displayMode;
     private requestNotificationPermission;
     /**
      * Whether an existing subscription was created with the given VAPID key.
